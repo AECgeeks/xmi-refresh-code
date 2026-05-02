@@ -1,7 +1,8 @@
 from __future__ import annotations
 
 from dataclasses import dataclass, field
-from itertools import count
+from pathlib import Path
+import re
 from typing import Optional, Union
 import xml.etree.ElementTree as ET
 from xml.dom import minidom
@@ -18,13 +19,34 @@ UML = ns("http://www.eclipse.org/uml2/5.0.0/UML")
 ET.register_namespace("xmi", XMI.ns)
 ET.register_namespace("uml", UML.ns)
 
-_ids = count(1)
-
-def new_id(prefix: str) -> str:
-    return f"{prefix}_{next(_ids)}"
-
 def upper_value(v: int | None) -> str:
     return "*" if v is None else str(v)
+
+def parse_upper_value(v: str | None) -> int | None:
+    return None if v in (None, "*") else int(v)
+
+def local_name(tag: str) -> str:
+    return tag.rsplit("}", 1)[-1]
+
+def xmi_type(el: ET.Element) -> str:
+    return el.get(XMI.type, "")
+
+def xmi_id(el: ET.Element) -> str:
+    return el.get(XMI.id, "")
+
+def child(el: ET.Element, name: str) -> ET.Element | None:
+    return next((c for c in el if local_name(c.tag) == name), None)
+
+def children(el: ET.Element, name: str) -> list[ET.Element]:
+    return [c for c in el if local_name(c.tag) == name]
+
+def child_text(el: ET.Element, name: str) -> str:
+    c = child(el, name)
+    return (c.text if c is not None else None) or ""
+
+def bool_attr(el: ET.Element, name: str, default: bool = False) -> bool:
+    v = el.get(name)
+    return default if v is None else v.lower() == "true"
 
 def generate_id(obj) -> str:
     def slug(name):
@@ -49,6 +71,8 @@ def generate_id(obj) -> str:
             return f"as_{slug(obj.name)}"
         else:
             return f"as_{obj.source.name}_{slug(obj.name)}"
+    if isinstance(obj, Dependency):
+        return f"dp_{obj.source.name}_{obj.target.name}"
     if isinstance(obj, UnionType):
         return f"un_{slug(obj.name)}"
     if isinstance(obj, Constraint):
@@ -59,24 +83,34 @@ def generate_id(obj) -> str:
         return f"ct_{own}{slug(obj.name)}"
     if isinstance(obj, Import):
         return f"ip_{obj.name.split('.')[0]}"
-    breakpoint()
-    return ""
+    raise TypeError(f"Cannot generate an XMI id for {type(obj).__name__}")
 
 @dataclass(kw_only=True)
 class Base:
     xmi_id_: Optional[str] = None
-    owner: 'Optional[Base]' = None
+    owner: 'Optional[Base]' = field(default=None, repr=False)
+
+    def __post_init__(self) -> None:
+        if self.xmi_id_ is None:
+            self.xmi_id_ = generate_id(self)
 
     @property
     def xmi_id(self) -> str:
-        if i := self.xmi_id_:
-            return i
-        self.xmi_id_ = generate_id(self)
+        assert self.xmi_id_ is not None
         return self.xmi_id_
+
+    def root_model(self) -> "Model":
+        root: Base = self
+        while not isinstance(root, Model):
+            if root.owner is None:
+                raise ValueError(f"{type(self).__name__} is not attached to a model")
+            root = root.owner
+        return root
 
 @dataclass(eq=False)
 class Import(Base):
     name: str
+    imported: "Namespace | None" = None
 
 @dataclass(eq=False)
 class DataType(Base):
@@ -143,8 +177,16 @@ class DirectedAssociation(Relationship):
     target_upper: int | None = 1
     ordered: bool = False
     owning_attribute: Attribute | None = None
-    source_end_id: str = field(default_factory=lambda: new_id("end"))
-    target_end_id: str = field(default_factory=lambda: new_id("end"))
+    source_end_id: str | None = None
+    target_end_id: str | None = None
+
+    def __post_init__(self) -> None:
+        super().__post_init__()
+        model = self.source.root_model()
+        if self.source_end_id is None:
+            self.source_end_id = model.new_id("end")
+        if self.target_end_id is None:
+            self.target_end_id = model.new_id("end")
 
 
 @dataclass(eq=False)
@@ -155,6 +197,19 @@ class Class(Base):
     super: list[Class] = field(default_factory=list)
     comment: Optional[str] = None
     is_abstract: bool = False
+
+    def supertype_names(self):
+        seen: set[str] = set()
+
+        def walk(cls: Class):
+            if cls.name in seen:
+                return
+            seen.add(cls.name)
+            yield cls.name
+            for sup in cls.super:
+                yield from walk(sup)
+
+        yield from walk(self)
 
     def attr(
         self,
@@ -218,6 +273,7 @@ class Class(Base):
                 owner=self
             )
             assoc.owning_attribute = attr
+            assoc.source_end_id = attr.xmi_id
             self.attributes.append(attr)           
         return assoc
 
@@ -226,6 +282,31 @@ class Class(Base):
 class Namespace(Base):
     name: str
     elements: list[Base] = field(default_factory=list)
+
+    def walk(self, _seen: set[int] | None = None):
+        if _seen is None:
+            _seen = set()
+        if id(self) in _seen:
+            return
+        _seen.add(id(self))
+        yield self
+        for element in self.elements:
+            if isinstance(element, Namespace):
+                yield from element.walk(_seen)
+            else:
+                yield element
+                if isinstance(element, Import) and element.imported is not None:
+                    yield from element.imported.walk(_seen)
+            if isinstance(element, Class):
+                yield from element.attributes
+            elif isinstance(element, DataType):
+                yield from element.constraints
+
+    def by_id(self, xmi_id: str) -> Base | None:
+        return next((element for element in self.walk() if element.xmi_id == xmi_id), None)
+
+    def by_name(self, name: str) -> Base | None:
+        return next((element for element in self.walk() if re.split(r'_\w{1,2}\[', getattr(element, "name", ''))[0] == name), None)
 
     def datatype(self, name: str, super: 'Optional[DataType]' = None) -> DataType:
         t = DataType(name=name, super=[super] if super else [], owner=self)
@@ -272,6 +353,318 @@ class Package(Namespace):
 
 @dataclass(eq=False)
 class Model(Namespace):
+    _next_id: int = field(default=1, init=False, repr=False)
+
+    def new_id(self, prefix: str) -> str:
+        xmi_id = f"{prefix}_{self._next_id}"
+        self._next_id += 1
+        return xmi_id
+
+    def _reserve_ids_from_xml(self, root: ET.Element) -> None:
+        max_suffix = 0
+        for el in root.iter():
+            for value in el.attrib.values():
+                for match in re.finditer(r"\b[A-Za-z]+_(\d+)\b", value):
+                    max_suffix = max(max_suffix, int(match.group(1)))
+        self._next_id = max(self._next_id, max_suffix + 1)
+
+    @classmethod
+    def load(cls, path: str | Path) -> "Model":
+        return cls.from_file(path)
+
+    @classmethod
+    def from_file(cls, path: str | Path) -> "Model":
+        path = Path(path)
+        return cls.from_element(
+            ET.parse(path).getroot(),
+            base_path=path.parent,
+            _loaded_imports={},
+            _current_path=path.resolve(),
+        )
+
+    @classmethod
+    def from_xml(cls, xml: str) -> "Model":
+        return cls.from_element(ET.fromstring(xml))
+
+    @classmethod
+    def from_element(
+        cls,
+        root: ET.Element,
+        base_path: Path | None = None,
+        _loaded_imports: dict[Path, "Model | None"] | None = None,
+        _current_path: Path | None = None,
+    ) -> "Model":
+        model_el = root if local_name(root.tag) == "Model" else next(
+            el for el in root if local_name(el.tag) == "Model"
+        )
+        model = cls(
+            name=model_el.get("name", ""),
+            xmi_id_=xmi_id(model_el) or None,
+        )
+        if _loaded_imports is not None and _current_path is not None:
+            _loaded_imports[_current_path] = model
+
+        by_id: dict[str, Base] = {model.xmi_id: model}
+        class_elems: list[tuple[Class, ET.Element]] = []
+        datatype_elems: list[tuple[DataType, ET.Element]] = []
+        association_elems: list[tuple[Namespace, ET.Element]] = []
+        dependency_elems: list[tuple[Namespace, ET.Element]] = []
+
+        def load_import(imported_package: str) -> Namespace | None:
+            if base_path is None or "#" not in imported_package:
+                return None
+            file_part, ref_id = imported_package.rsplit("#", 1)
+            import_path = (base_path / file_part).resolve()
+            if not import_path.exists():
+                return None
+            if _loaded_imports is None:
+                loaded_imports: dict[Path, Model | None] = {}
+            else:
+                loaded_imports = _loaded_imports
+            if import_path in loaded_imports:
+                imported_model = loaded_imports[import_path]
+                return None if imported_model is None else imported_model.by_id(ref_id)
+            loaded_imports[import_path] = None
+            imported_model = cls.from_element(
+                ET.parse(import_path).getroot(),
+                base_path=import_path.parent,
+                _loaded_imports=loaded_imports,
+                _current_path=import_path,
+            )
+            loaded_imports[import_path] = imported_model
+            return imported_model.by_id(ref_id) or imported_model
+
+        def resolve_href(href: str) -> Base:
+            if not href:
+                raise ValueError("Cannot resolve an empty href")
+            resolved = load_import(href)
+            if resolved is None:
+                raise ValueError(f"Cannot resolve href {href!r}")
+            return resolved
+
+        def register(obj: Base) -> None:
+            if obj.xmi_id:
+                by_id[obj.xmi_id] = obj
+
+        def parse_spec(el: ET.Element) -> tuple[str, str]:
+            spec = child(el, "specification")
+            if spec is None:
+                return "", ""
+            return child_text(spec, "language"), child_text(spec, "body")
+
+        def parse_constraint(el: ET.Element, owner: Base) -> Constraint:
+            language, body = parse_spec(el)
+            return Constraint(
+                name=el.get("name", ""),
+                language=language,
+                body=body,
+                owner=owner,
+                xmi_id_=xmi_id(el) or None,
+            )
+
+        def parse_comment(el: ET.Element) -> str | None:
+            c = child(el, "ownedComment")
+            if c is None:
+                return None
+            return child_text(c, "body")
+
+        def parse_lower_upper(el: ET.Element) -> tuple[int, int | None]:
+            lower = child(el, "lowerValue")
+            upper = child(el, "upperValue")
+            return (
+                int(lower.get("value", "0")) if lower is not None else 0,
+                parse_upper_value(upper.get("value") if upper is not None else "1"),
+            )
+
+        def ref_obj(el: ET.Element, name: str) -> Base:
+            ref_id = el.get(name)
+            if ref_id:
+                return by_id[ref_id]
+            ref_el = child(el, name)
+            if ref_el is None:
+                raise ValueError(f"Missing {name!r} reference on {local_name(el.tag)}")
+            if href := ref_el.get("href"):
+                ref_id = href.rsplit("#", 1)[-1]
+                return by_id.get(ref_id) or resolve_href(href)
+            ref_id = ref_el.get(XMI.idref)
+            if not ref_id:
+                raise ValueError(f"Missing id in {name!r} reference on {local_name(el.tag)}")
+            return by_id[ref_id]
+
+        def read_namespace(ns: Namespace, ns_el: ET.Element) -> None:
+            for el in ns_el:
+                tag = local_name(el.tag)
+                if tag == "packageImport":
+                    imported_package = el.get("importedPackage", "")
+                    imp = Import(
+                        name=imported_package,
+                        imported=load_import(imported_package),
+                        owner=ns,
+                        xmi_id_=xmi_id(el) or None,
+                    )
+                    ns.elements.append(imp)
+                    register(imp)
+                elif tag != "packagedElement":
+                    continue
+                kind = xmi_type(el)
+                name = el.get("name", "")
+                if kind == "uml:Package":
+                    pkg = Package(name=name, owner=ns, xmi_id_=xmi_id(el) or None)
+                    ns.elements.append(pkg)
+                    register(pkg)
+                    read_namespace(pkg, el)
+                elif kind in {"uml:DataType", "uml:PrimitiveType"}:
+                    dt = DataType(name=name, owner=ns, xmi_id_=xmi_id(el) or None)
+                    ns.elements.append(dt)
+                    register(dt)
+                    datatype_elems.append((dt, el))
+                elif kind == "uml:Enumeration":
+                    enum = Enumeration(
+                        name=name,
+                        literals=[lit.get("name", "") for lit in children(el, "ownedLiteral")],
+                        owner=ns,
+                        xmi_id_=xmi_id(el) or None,
+                    )
+                    ns.elements.append(enum)
+                    register(enum)
+                elif kind == "uml:Class":
+                    if xmi_id(el).startswith("un_"):
+                        union = UnionType(name=name, owner=ns, xmi_id_=xmi_id(el) or None)
+                        ns.elements.append(union)
+                        register(union)
+                    else:
+                        klass = Class(
+                            name=name,
+                            parent=ns,
+                            owner=ns,
+                            comment=parse_comment(el),
+                            is_abstract=bool_attr(el, "isAbstract"),
+                            xmi_id_=xmi_id(el) or None,
+                        )
+                        ns.elements.append(klass)
+                        register(klass)
+                        class_elems.append((klass, el))
+                elif kind == "uml:Constraint":
+                    constraint = parse_constraint(el, ns)
+                    ns.elements.append(constraint)
+                    register(constraint)
+                elif kind == "uml:Association":
+                    association_elems.append((ns, el))
+                elif kind == "uml:Dependency":
+                    dependency_elems.append((ns, el))
+
+        read_namespace(model, model_el)
+
+        for dt, el in datatype_elems:
+            for gen in children(el, "generalization"):
+                dt.super.append(ref_obj(gen, "general"))  # type: ignore[arg-type]
+            for rule_el in children(el, "ownedRule"):
+                constraint = parse_constraint(rule_el, dt)
+                dt.constraints.append(constraint)
+                register(constraint)
+
+        attributes_by_association: dict[str, list[Attribute]] = {}
+
+        for klass, el in class_elems:
+            for gen in children(el, "generalization"):
+                klass.super.append(ref_obj(gen, "general"))  # type: ignore[arg-type]
+            for attr_el in children(el, "ownedAttribute"):
+                lower, upper = parse_lower_upper(attr_el)
+                default_value = child(attr_el, "defaultValue")
+                attr = Attribute(
+                    name=attr_el.get("name", ""),
+                    type=ref_obj(attr_el, "type"),  # type: ignore[arg-type]
+                    lower=lower,
+                    upper=upper,
+                    ordered=bool_attr(attr_el, "isOrdered"),
+                    derived=child_text(default_value, "body") if default_value is not None else None,
+                    comment=parse_comment(attr_el),
+                    owner=klass,
+                    xmi_id_=xmi_id(attr_el) or None,
+                )
+                klass.attributes.append(attr)
+                register(attr)
+                if association_id := attr_el.get("association"):
+                    attributes_by_association.setdefault(association_id, []).append(attr)
+            for rule_el in children(el, "ownedRule"):
+                constraint = parse_constraint(rule_el, klass)
+                klass.attributes.append(constraint)
+                register(constraint)
+
+        for ns, el in association_elems:
+            assoc_id = xmi_id(el)
+            owned_ends = children(el, "ownedEnd")
+            owning_attribute = next(iter(attributes_by_association.get(assoc_id, [])), None)
+            if owning_attribute is not None:
+                end = owned_ends[0]
+                source = ref_obj(end, "type")
+                if not isinstance(source, Class):
+                    raise TypeError(f"Association {assoc_id} source is not a class")
+                source_lower, source_upper = parse_lower_upper(end)
+                association = DirectedAssociation(
+                    name=el.get("name", ""),
+                    source=source,
+                    target=owning_attribute.type,  # type: ignore[arg-type]
+                    source_role=end.get("name", ""),
+                    target_role=owning_attribute.name,
+                    source_lower=source_lower,
+                    source_upper=source_upper,
+                    target_lower=owning_attribute.lower,
+                    target_upper=owning_attribute.upper,
+                    ordered=owning_attribute.ordered,
+                    owning_attribute=owning_attribute,
+                    source_end_id=owning_attribute.xmi_id,
+                    target_end_id=xmi_id(end) or None,
+                    owner=source,
+                    xmi_id_=assoc_id or None,
+                )
+                owning_attribute.association = association
+            else:
+                if len(owned_ends) != 2:
+                    raise ValueError(f"Association {assoc_id} needs two owned ends")
+                target_end, source_end = owned_ends
+                source = ref_obj(source_end, "type")
+                target = ref_obj(target_end, "type")
+                if not isinstance(source, Class):
+                    raise TypeError(f"Association {assoc_id} source is not a class")
+                target_lower, target_upper = parse_lower_upper(target_end)
+                source_lower, source_upper = parse_lower_upper(source_end)
+                association = DirectedAssociation(
+                    name=el.get("name", ""),
+                    source=source,
+                    target=target,  # type: ignore[arg-type]
+                    source_role=source_end.get("name", ""),
+                    target_role=target_end.get("name", ""),
+                    source_lower=source_lower,
+                    source_upper=source_upper,
+                    target_lower=target_lower,
+                    target_upper=target_upper,
+                    source_end_id=xmi_id(target_end) or None,
+                    target_end_id=xmi_id(source_end) or None,
+                    owner=source,
+                    xmi_id_=assoc_id or None,
+                )
+            ns.elements.append(association)
+            register(association)
+
+        for ns, el in dependency_elems:
+            source = ref_obj(el, "client")
+            target = ref_obj(el, "supplier")
+            if isinstance(source, UnionType):
+                source.members.append(target)  # type: ignore[arg-type]
+            else:
+                dependency = Dependency(
+                    name=el.get("name") or f"Dependency{source.name}{target.name}",
+                    source=source,  # type: ignore[arg-type]
+                    target=target,  # type: ignore[arg-type]
+                    owner=ns,
+                    xmi_id_=xmi_id(el) or None,
+                )
+                ns.elements.append(dependency)
+                register(dependency)
+
+        model._reserve_ids_from_xml(root)
+        return model
 
     def ref(self, el: ET.Element, name: str, other : Base):
         other_root = other
@@ -335,7 +728,7 @@ class Model(Namespace):
                         "generalization",
                         {
                             XMI.type: "uml:Generalization",
-                            XMI.id: new_id("gen"),
+                            XMI.id: self.new_id("gen"),
                         },
                     )
                     self.ref(gen, "general", sup)
@@ -354,7 +747,7 @@ class Model(Namespace):
                         "specification",
                         {
                             XMI.type: "uml:OpaqueExpression",
-                            XMI.id: new_id("expr"),
+                            XMI.id: self.new_id("expr"),
                             "name": ct.name,
                         },
                     )
@@ -375,7 +768,7 @@ class Model(Namespace):
                 for mem in elt.members:
                     attrs = {
                         XMI.type: "uml:Dependency",
-                        XMI.id: new_id("dependency"),
+                        XMI.id: self.new_id("dependency"),
                         # @todo verify order
                     }
                     dep = ET.SubElement(el, "packagedElement", attrs)
@@ -400,7 +793,7 @@ class Model(Namespace):
                         "ownedComment",
                         {
                             XMI.type: "uml:Comment",
-                            XMI.id: new_id("comment"),
+                            XMI.id: self.new_id("comment"),
                         },
                     )
                     body = ET.SubElement(c, "body")
@@ -412,7 +805,7 @@ class Model(Namespace):
                         "generalization",
                         {
                             XMI.type: "uml:Generalization",
-                            XMI.id: new_id("gen"),
+                            XMI.id: self.new_id("gen"),
                         },
                     )
                     self.ref(gen, "general", sup)
@@ -436,7 +829,7 @@ class Model(Namespace):
                             "lowerValue",
                             {
                                 XMI.type: "uml:LiteralInteger",
-                                XMI.id: new_id("lower"),
+                                XMI.id: self.new_id("lower"),
                                 "value": str(a.lower),
                             },
                         )
@@ -445,7 +838,7 @@ class Model(Namespace):
                             "upperValue",
                             {
                                 XMI.type: "uml:LiteralUnlimitedNatural",
-                                XMI.id: new_id("upper"),
+                                XMI.id: self.new_id("upper"),
                                 "value": upper_value(a.upper),
                             },
                         )
@@ -455,7 +848,7 @@ class Model(Namespace):
                                 "defaultValue",
                                 {
                                     XMI.type: "uml:OpaqueExpression",
-                                    XMI.id: new_id("expr"),
+                                    XMI.id: self.new_id("expr"),
                                     "name": a.name,
                                 },
                             )
@@ -469,7 +862,7 @@ class Model(Namespace):
                                 "ownedComment",
                                 {
                                     XMI.type: "uml:Comment",
-                                    XMI.id: new_id("comment"),
+                                    XMI.id: self.new_id("comment"),
                                 },
                             )
                             body = ET.SubElement(c, "body")
@@ -489,7 +882,7 @@ class Model(Namespace):
                             "specification",
                             {
                                 XMI.type: "uml:OpaqueExpression",
-                                XMI.id: new_id("expr"),
+                                XMI.id: self.new_id("expr"),
                                 "name": a.name,
                             },
                         )
@@ -514,7 +907,7 @@ class Model(Namespace):
                         "ownedLiteral",
                         {
                             XMI.type: "uml:EnumerationLiteral",
-                            XMI.id: new_id("literal"),
+                            XMI.id: self.new_id("literal"),
                             "name": lit,
                         },
                     )
@@ -522,7 +915,7 @@ class Model(Namespace):
             elif isinstance(elt, Dependency):
                 attrs = {
                     XMI.type: "uml:Dependency",
-                    XMI.id: new_id("dependency"),
+                    XMI.id: elt.xmi_id,
                     # @todo verify order
                 }
                 dep = ET.SubElement(el, "packagedElement", attrs)
@@ -562,7 +955,7 @@ class Model(Namespace):
                         "lowerValue",
                         {
                             XMI.type: "uml:LiteralInteger",
-                            XMI.id: new_id("lower"),
+                            XMI.id: self.new_id("lower"),
                             "value": str(lower),
                         },
                     )
@@ -571,7 +964,7 @@ class Model(Namespace):
                         "upperValue",
                         {
                             XMI.type: "uml:LiteralUnlimitedNatural",
-                            XMI.id: new_id("upper"),
+                            XMI.id: self.new_id("upper"),
                             "value": upper_value(upper),
                         },
                     )
@@ -595,7 +988,7 @@ class Model(Namespace):
                     "specification",
                     {
                         XMI.type: "uml:OpaqueExpression",
-                        XMI.id: new_id("expr"),
+                        XMI.id: self.new_id("expr"),
                         "name": elt.name,
                     },
                 )
@@ -631,33 +1024,10 @@ class Model(Namespace):
         raw = ET.tostring(self.to_element(), encoding="utf-8")
         return minidom.parseString(raw).toprettyxml(indent="  ", encoding="UTF-8").decode("utf-8")
 
-    def save(self) -> None:
-        with open(f"{self.name}.uml", "w", encoding="utf-8") as f:
-            f.write(self.to_xml())
-
-if __name__ == "__main__":
-    m = Model("Example")
-
-    string = m.datatype("String")
-    integer = m.datatype("Integer")
-
-    person = m.cls("Person")
-    employee = m.cls("Employee", super=person)
-    company = m.cls("Company")
-
-    person.attr("name", string, lower=1)
-    employee.attr("employeeId", integer, lower=1)
-
-    company.directed_association(
-        name="Employment",
-        target=employee,
-        source_role="employer",
-        target_role="employees",
-        source_lower=1,
-        source_upper=1,
-        target_lower=0,
-        target_upper=None,
-        ordered=True,
-    )
-
-    m.save("example.uml")
+    def save(self, path: str | Path | None = None) -> None:
+        path = Path(path) if path is not None else Path(f"{self.name}.uml")
+        xml = self.to_xml()
+        tmp_path = path.with_name(f"{path.name}.tmp")
+        with tmp_path.open("w", encoding="utf-8") as f:
+            f.write(xml)
+        tmp_path.replace(path)
