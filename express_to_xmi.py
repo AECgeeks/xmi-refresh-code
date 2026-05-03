@@ -86,8 +86,12 @@ class converter:
             self.M = xmi.Model.load(filepath)
         else:
             self.M = xmi.Model(schema_name)
-        self.models = [self.M]
+        self.models = list(self.M.referenced_models())
         self.package_resolver = package_resolver
+
+    def add_model(self, model: xmi.Model) -> None:
+        if model not in self.models:
+            self.models.append(model)
 
     def pkg(self, item_name : str):
         c = self.M
@@ -99,7 +103,7 @@ class converter:
             else:
                 if depth == 1:
                     imported_model = xmi.Model(pk)
-                    self.models.append(imported_model)
+                    self.add_model(imported_model)
                     c = imported_model.package(pk)
                     self.M.elements.append(xmi.Import(f"{pk}.uml#pk_{pk}", owner=self.M, imported=c))
                 else:

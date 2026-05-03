@@ -355,6 +355,20 @@ class Package(Namespace):
 class Model(Namespace):
     _next_id: int = field(default=1, init=False, repr=False)
 
+    def referenced_models(self):
+        seen: set[int] = set()
+
+        def walk_model(model: Model):
+            if id(model) in seen:
+                return
+            seen.add(id(model))
+            yield model
+            for element in model.elements:
+                if isinstance(element, Import) and element.imported is not None:
+                    yield from walk_model(element.imported.root_model())
+
+        yield from walk_model(self)
+
     def new_id(self, prefix: str) -> str:
         xmi_id = f"{prefix}_{self._next_id}"
         self._next_id += 1
@@ -495,7 +509,10 @@ class Model(Namespace):
             for el in ns_el:
                 tag = local_name(el.tag)
                 if tag == "packageImport":
-                    imported_package = el.get("importedPackage", "")
+                    if imported_package := el.get("importedPackage", None):
+                        pass
+                    else:
+                        imported_package = child(el, "importedPackage").get("href")
                     imp = Import(
                         name=imported_package,
                         imported=load_import(imported_package),
@@ -687,17 +704,18 @@ class Model(Namespace):
                 },
             )
 
-    def _namespace_element(self, parent: ET.Element, ns: Namespace) -> ET.Element:
+    def _namespace_element(self, ns: Namespace, parent: Optional[ET.Element] = None) -> ET.Element:
         if isinstance(ns, Model):
-            el = ET.SubElement(
-                parent,
+            el = ET.Element(
                 UML.Model,
                 {
                     XMI.id: ns.xmi_id,
                     "name": ns.name,
+                    XMI.version: "20131001",
                 },
             )
         else:
+            assert parent is not None
             el = ET.SubElement(
                 parent,
                 "packagedElement",
@@ -710,7 +728,7 @@ class Model(Namespace):
 
         for elt in ns.elements:
             if isinstance(elt, Package):
-                self._namespace_element(el, elt)
+                self._namespace_element(elt, parent=el)
 
             elif isinstance(elt, DataType):
                 de = ET.SubElement(
@@ -722,16 +740,6 @@ class Model(Namespace):
                         "name": elt.name,
                     },
                 )
-                for sup in elt.super:
-                    gen = ET.SubElement(
-                        de,
-                        "generalization",
-                        {
-                            XMI.type: "uml:Generalization",
-                            XMI.id: self.new_id("gen"),
-                        },
-                    )
-                    self.ref(gen, "general", sup)
                 for ct in elt.constraints:
                     re = ET.SubElement(
                         de,
@@ -755,6 +763,17 @@ class Model(Namespace):
                     lang.text = ct.language
                     body = ET.SubElement(spec, "body")
                     body.text = ct.body
+                for sup in elt.super:
+                    gen = ET.SubElement(
+                        de,
+                        "generalization",
+                        {
+                            XMI.type: "uml:Generalization",
+                            XMI.id: self.new_id("gen"),
+                        },
+                    )
+                    self.ref(gen, "general", sup)
+                
             elif isinstance(elt, UnionType):
                 de = ET.SubElement(
                     el,
@@ -799,6 +818,30 @@ class Model(Namespace):
                     body = ET.SubElement(c, "body")
                     body.text = elt.comment
 
+                for a in (c for c in elt.attributes if isinstance(c, Constraint)):
+                    re = ET.SubElement(
+                        ce,
+                        "ownedRule",
+                        {
+                            XMI.type: "uml:Constraint",
+                            XMI.id: a.xmi_id,
+                            "name": a.name,
+                        },
+                    )
+                    spec = ET.SubElement(
+                        re,
+                        "specification",
+                        {
+                            XMI.type: "uml:OpaqueExpression",
+                            XMI.id: self.new_id("expr"),
+                            "name": a.name,
+                        },
+                    )
+                    lang = ET.SubElement(spec, "language")
+                    lang.text = a.language
+                    body = ET.SubElement(spec, "body")
+                    body.text = a.body
+
                 for sup in elt.super:
                     gen = ET.SubElement(
                         ce,
@@ -810,86 +853,61 @@ class Model(Namespace):
                     )
                     self.ref(gen, "general", sup)
 
-                for a in elt.attributes:
-                    if isinstance(a, Attribute):
-                        attrs = {
-                            XMI.type: "uml:Property",
-                            XMI.id: a.xmi_id,
-                            "name": a.name,
-                            "isOrdered": str(a.ordered).lower(),
-                        }
-                        if a.derived is not None:
-                            attrs["isDerived"] = "true"
-                        ae = ET.SubElement(ce, "ownedAttribute", attrs)
-                        if a.association is not None:
-                            self.ref(ae, "association", a.association)
-                        self.ref(ae, "type", a.type)
-                        ET.SubElement(
+                for a in (c for c in elt.attributes if isinstance(c, Attribute)):
+                    attrs = {
+                        XMI.type: "uml:Property",
+                        XMI.id: a.xmi_id,
+                        "name": a.name,
+                        **({"isOrdered": str(a.ordered).lower()} if a.ordered else {}),
+                    }
+                    ae = ET.SubElement(ce, "ownedAttribute", attrs)
+                    self.ref(ae, "type", a.type)
+                    ae.set("isDerived", "true")
+                    if a.association is not None:
+                        self.ref(ae, "association", a.association)
+                    ET.SubElement(
+                        ae,
+                        "lowerValue",
+                        {
+                            XMI.type: "uml:LiteralInteger",
+                            XMI.id: self.new_id("lower"),
+                            **({"value": str(a.lower)} if a.lower != 0 else {}),
+                        },
+                    )
+                    ET.SubElement(
+                        ae,
+                        "upperValue",
+                        {
+                            XMI.type: "uml:LiteralUnlimitedNatural",
+                            XMI.id: self.new_id("upper"),
+                            "value": upper_value(a.upper),
+                        },
+                    )
+                    if a.derived is not None:
+                        dv = ET.SubElement(
                             ae,
-                            "lowerValue",
-                            {
-                                XMI.type: "uml:LiteralInteger",
-                                XMI.id: self.new_id("lower"),
-                                "value": str(a.lower),
-                            },
-                        )
-                        ET.SubElement(
-                            ae,
-                            "upperValue",
-                            {
-                                XMI.type: "uml:LiteralUnlimitedNatural",
-                                XMI.id: self.new_id("upper"),
-                                "value": upper_value(a.upper),
-                            },
-                        )
-                        if a.derived is not None:
-                            dv = ET.SubElement(
-                                ae,
-                                "defaultValue",
-                                {
-                                    XMI.type: "uml:OpaqueExpression",
-                                    XMI.id: self.new_id("expr"),
-                                    "name": a.name,
-                                },
-                            )
-                            lang = ET.SubElement(dv, "language")
-                            lang.text = "EXPRESS"
-                            body = ET.SubElement(dv, "body")
-                            body.text = a.derived
-                        if a.comment is not None:
-                            c = ET.SubElement(
-                                ae,
-                                "ownedComment",
-                                {
-                                    XMI.type: "uml:Comment",
-                                    XMI.id: self.new_id("comment"),
-                                },
-                            )
-                            body = ET.SubElement(c, "body")
-                            body.text = a.comment
-                    elif isinstance(a, Constraint):
-                        re = ET.SubElement(
-                            ce,
-                            "ownedRule",
-                            {
-                                XMI.type: "uml:Constraint",
-                                XMI.id: a.xmi_id,
-                                "name": a.name,
-                            },
-                        )
-                        spec = ET.SubElement(
-                            re,
-                            "specification",
+                            "defaultValue",
                             {
                                 XMI.type: "uml:OpaqueExpression",
                                 XMI.id: self.new_id("expr"),
                                 "name": a.name,
                             },
                         )
-                        lang = ET.SubElement(spec, "language")
-                        lang.text = a.language
-                        body = ET.SubElement(spec, "body")
-                        body.text = a.body
+                        lang = ET.SubElement(dv, "language")
+                        lang.text = "EXPRESS"
+                        body = ET.SubElement(dv, "body")
+                        body.text = a.derived
+                    if a.comment is not None:
+                        c = ET.SubElement(
+                            ae,
+                            "ownedComment",
+                            {
+                                XMI.type: "uml:Comment",
+                                XMI.id: self.new_id("comment"),
+                            },
+                        )
+                        body = ET.SubElement(c, "body")
+                        body.text = a.comment
 
             elif isinstance(elt, Enumeration):
                 ee = ET.SubElement(
@@ -946,17 +964,17 @@ class Model(Namespace):
                             XMI.type: "uml:Property",
                             XMI.id: id,
                             "name": name,
-                            "association": elt.xmi_id,
                         },
                     )
                     self.ref(tgt, "type", type)
+                    tgt.set("association", elt.xmi_id)
                     ET.SubElement(
                         tgt,
                         "lowerValue",
                         {
                             XMI.type: "uml:LiteralInteger",
                             XMI.id: self.new_id("lower"),
-                            "value": str(lower),
+                            **({"value": str(lower)} if lower != 0 else {}),
                         },
                     )
                     ET.SubElement(
@@ -999,26 +1017,29 @@ class Model(Namespace):
                 body.text = elt.body
             elif isinstance(elt, Import):
                 
-                ET.SubElement(
+                sel = ET.SubElement(
                     el,
                     "packageImport",
                     {
                         XMI.type: "uml:PackageImport",
                         XMI.id: elt.xmi_id,
-                        "importedPackage": elt.name,
+                    },
+                )
+
+                assert "#" in elt.name
+
+                ET.SubElement(
+                    sel,
+                    "importedPackage",
+                    {
+                        XMI.type: "uml:Package",
+                        "href": elt.name,
                     },
                 )
         return el
 
     def to_element(self) -> ET.Element:
-        root = ET.Element(
-            XMI.XMI,
-            {
-                XMI.version: "20131001",
-            },
-        )
-        self._namespace_element(root, self)
-        return root
+        return self._namespace_element(self)
 
     def to_xml(self) -> str:
         raw = ET.tostring(self.to_element(), encoding="utf-8")
