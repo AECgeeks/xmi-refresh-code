@@ -501,20 +501,7 @@ class Model(Namespace):
         def read_namespace(ns: Namespace, ns_el: ET.Element) -> None:
             for el in ns_el:
                 tag = local_name(el.tag)
-                if tag == "packageImport":
-                    if imported_package := el.get("importedPackage", None):
-                        pass
-                    else:
-                        imported_package = child(el, "importedPackage").get("href")
-                    imp = Import(
-                        name=imported_package,
-                        imported=load_import(imported_package),
-                        owner=ns,
-                        xmi_id_=xmi_id(el) or None,
-                    )
-                    ns.elements.append(imp)
-                    register(imp)
-                elif tag != "packagedElement":
+                if tag != "packagedElement":
                     continue
                 kind = xmi_type(el)
                 name = el.get("name", "")
@@ -561,6 +548,22 @@ class Model(Namespace):
                     association_elems.append((ns, el))
                 elif kind == "uml:Dependency":
                     dependency_elems.append((ns, el))
+
+            for el in ns_el:
+                if local_name(el.tag) != "packageImport":
+                    continue
+                if imported_package := el.get("importedPackage", None):
+                    pass
+                else:
+                    imported_package = child(el, "importedPackage").get("href")
+                imp = Import(
+                    name=imported_package,
+                    imported=load_import(imported_package),
+                    owner=ns,
+                    xmi_id_=xmi_id(el) or None,
+                )
+                ns.elements.append(imp)
+                register(imp)
 
         read_namespace(model, model_el)
 
@@ -854,7 +857,8 @@ class Model(Namespace):
                     }
                     ae = ET.SubElement(ce, "ownedAttribute", attrs)
                     self.ref(ae, "type", a.type)
-                    ae.set("isDerived", "true")
+                    if a.derived is not None:
+                        ae.set("isDerived", "true")
                     if a.association is not None:
                         self.ref(ae, "association", a.association)
                     ET.SubElement(
