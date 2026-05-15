@@ -182,17 +182,15 @@ class DirectedAssociation(Relationship):
 
     def __post_init__(self) -> None:
         super().__post_init__()
-        model = self.source.root_model()
         if self.source_end_id is None:
-            self.source_end_id = model.new_id("end")
+            self.source_end_id = f"{self.xmi_id}_source_end"
         if self.target_end_id is None:
-            self.target_end_id = model.new_id("end")
+            self.target_end_id = f"{self.xmi_id}_target_end"
 
 
 @dataclass(eq=False)
 class Class(Base):
     name: str
-    parent: Namespace
     attributes: list[Attribute | Constraint] = field(default_factory=list)
     super: list[Class] = field(default_factory=list)
     comment: Optional[str] = None
@@ -261,7 +259,7 @@ class Class(Base):
             ordered=ordered,
             owner=self,
         )
-        self.parent.elements.append(assoc)
+        self.owner.elements.append(assoc)
         if owned_attribute:
             attr = Attribute(
                 name=target_role,
@@ -314,7 +312,7 @@ class Namespace(Base):
         return t
 
     def cls(self, name: str, super: Class | None = None, comment: Optional[str] = None, is_abstract: bool = False) -> Class:
-        c = Class(name=name, super=[super] if super else [], parent=self, comment=comment, owner=self, is_abstract=is_abstract)
+        c = Class(name=name, super=[super] if super else [], comment=comment, owner=self, is_abstract=is_abstract)
         self.elements.append(c)
         return c
 
@@ -368,11 +366,6 @@ class Model(Namespace):
                     yield from walk_model(element.imported.root_model())
 
         yield from walk_model(self)
-
-    def new_id(self, prefix: str) -> str:
-        xmi_id = f"{prefix}_{self._next_id}"
-        self._next_id += 1
-        return xmi_id
 
     def _reserve_ids_from_xml(self, root: ET.Element) -> None:
         max_suffix = 0
@@ -552,7 +545,6 @@ class Model(Namespace):
                     else:
                         klass = Class(
                             name=name,
-                            parent=ns,
                             owner=ns,
                             comment=parse_comment(el),
                             is_abstract=bool_attr(el, "isAbstract"),
@@ -755,7 +747,7 @@ class Model(Namespace):
                         "specification",
                         {
                             XMI.type: "uml:OpaqueExpression",
-                            XMI.id: self.new_id("expr"),
+                            XMI.id: f"{elt.xmi_id}_{ct.name}",
                             "name": ct.name,
                         },
                     )
@@ -769,7 +761,7 @@ class Model(Namespace):
                         "generalization",
                         {
                             XMI.type: "uml:Generalization",
-                            XMI.id: self.new_id("gen"),
+                            XMI.id: f"{elt.xmi_id}_gen_{sup.name}",
                         },
                     )
                     self.ref(gen, "general", sup)
@@ -787,7 +779,7 @@ class Model(Namespace):
                 for mem in elt.members:
                     attrs = {
                         XMI.type: "uml:Dependency",
-                        XMI.id: self.new_id("dependency"),
+                        XMI.id: f"dp_{elt.name}_{mem.name}",
                         # @todo verify order
                     }
                     dep = ET.SubElement(el, "packagedElement", attrs)
@@ -812,7 +804,7 @@ class Model(Namespace):
                         "ownedComment",
                         {
                             XMI.type: "uml:Comment",
-                            XMI.id: self.new_id("comment"),
+                            XMI.id: f"{elt.xmi_id}_comment_0",
                         },
                     )
                     body = ET.SubElement(c, "body")
@@ -833,7 +825,7 @@ class Model(Namespace):
                         "specification",
                         {
                             XMI.type: "uml:OpaqueExpression",
-                            XMI.id: self.new_id("expr"),
+                            XMI.id: f"{elt.xmi_id}_{a.name}",
                             "name": a.name,
                         },
                     )
@@ -848,7 +840,7 @@ class Model(Namespace):
                         "generalization",
                         {
                             XMI.type: "uml:Generalization",
-                            XMI.id: self.new_id("gen"),
+                            XMI.id: f"{elt.xmi_id}_gen_{sup.name}",
                         },
                     )
                     self.ref(gen, "general", sup)
@@ -870,7 +862,7 @@ class Model(Namespace):
                         "lowerValue",
                         {
                             XMI.type: "uml:LiteralInteger",
-                            XMI.id: self.new_id("lower"),
+                            XMI.id: f"{a.xmi_id}_lower",
                             **({"value": str(a.lower)} if a.lower != 0 else {}),
                         },
                     )
@@ -879,7 +871,7 @@ class Model(Namespace):
                         "upperValue",
                         {
                             XMI.type: "uml:LiteralUnlimitedNatural",
-                            XMI.id: self.new_id("upper"),
+                            XMI.id: f"{a.xmi_id}_upper",
                             "value": upper_value(a.upper),
                         },
                     )
@@ -889,7 +881,7 @@ class Model(Namespace):
                             "defaultValue",
                             {
                                 XMI.type: "uml:OpaqueExpression",
-                                XMI.id: self.new_id("expr"),
+                                XMI.id: f"{a.xmi_id}_expr",
                                 "name": a.name,
                             },
                         )
@@ -903,7 +895,7 @@ class Model(Namespace):
                             "ownedComment",
                             {
                                 XMI.type: "uml:Comment",
-                                XMI.id: self.new_id("comment"),
+                                XMI.id: f"{a.xmi_id}_comment_0",
                             },
                         )
                         body = ET.SubElement(c, "body")
@@ -925,7 +917,7 @@ class Model(Namespace):
                         "ownedLiteral",
                         {
                             XMI.type: "uml:EnumerationLiteral",
-                            XMI.id: self.new_id("literal"),
+                            XMI.id: f"{elt.xmi_id}_{lit}",
                             "name": lit,
                         },
                     )
@@ -973,7 +965,7 @@ class Model(Namespace):
                         "lowerValue",
                         {
                             XMI.type: "uml:LiteralInteger",
-                            XMI.id: self.new_id("lower"),
+                            XMI.id: f"{id}_lower",
                             **({"value": str(lower)} if lower != 0 else {}),
                         },
                     )
@@ -982,7 +974,7 @@ class Model(Namespace):
                         "upperValue",
                         {
                             XMI.type: "uml:LiteralUnlimitedNatural",
-                            XMI.id: self.new_id("upper"),
+                            XMI.id: f"{id}_upper",
                             "value": upper_value(upper),
                         },
                     )
@@ -1006,7 +998,7 @@ class Model(Namespace):
                     "specification",
                     {
                         XMI.type: "uml:OpaqueExpression",
-                        XMI.id: self.new_id("expr"),
+                        XMI.id: f"{elt.xmi_id}_expr",
                         "name": elt.name,
                     },
                 )
