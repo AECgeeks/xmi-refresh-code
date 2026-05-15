@@ -875,7 +875,7 @@ class Model(Namespace):
                         {
                             XMI.type: "uml:LiteralInteger",
                             XMI.id: self.new_id("lower"),
-                            "value": str(a.lower),
+                            **({"value": str(a.lower)} if a.lower != 0 else {}),
                         },
                     )
                     ET.SubElement(
@@ -978,7 +978,7 @@ class Model(Namespace):
                         {
                             XMI.type: "uml:LiteralInteger",
                             XMI.id: self.new_id("lower"),
-                            "value": str(lower),
+                            **({"value": str(lower)} if lower != 0 else {}),
                         },
                     )
                     ET.SubElement(
