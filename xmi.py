@@ -871,11 +871,9 @@ class Model(Namespace):
                         **({"isOrdered": str(a.ordered).lower()} if a.ordered else {}),
                     }
                     ae = ET.SubElement(ce, "ownedAttribute", attrs)
-                    self.ref(ae, "type", a.type)
+                    
                     if a.derived is not None:
                         ae.set("isDerived", "true")
-                    if a.association is not None:
-                        self.ref(ae, "association", a.association)
 
                     if a.comment is not None:
                         c = ET.SubElement(
@@ -888,6 +886,11 @@ class Model(Namespace):
                         )
                         body = ET.SubElement(c, "body")
                         body.text = a.comment
+
+                    self.ref(ae, "type", a.type)
+
+                    if a.association is not None:
+                        self.ref(ae, "association", a.association)
 
                     ET.SubElement(
                         ae,
