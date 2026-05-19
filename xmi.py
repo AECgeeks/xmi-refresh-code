@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+from collections.abc import Iterable, Iterator
 from dataclasses import dataclass, field
 from pathlib import Path
 import re
@@ -84,6 +85,20 @@ def generate_id(obj) -> str:
     if isinstance(obj, Import):
         return f"ip_{obj.name.split('.')[0]}"
     raise TypeError(f"Cannot generate an XMI id for {type(obj).__name__}")
+
+
+REFERENCE_ATTRIBUTES = frozenset({
+    "association",
+    "client",
+    "general",
+    "importedPackage",
+    "supplier",
+    "type",
+})
+MULTI_REFERENCE_ATTRIBUTES = frozenset({
+    "memberEnd",
+})
+REFERENCE_ELEMENTS = REFERENCE_ATTRIBUTES | MULTI_REFERENCE_ATTRIBUTES
 
 @dataclass(kw_only=True)
 class Base:
@@ -1048,3 +1063,238 @@ class Model(Namespace):
         with tmp_path.open("w", encoding="utf-8") as f:
             f.write(xml)
         tmp_path.replace(path)
+
+
+class ModelSet:
+    def __init__(self, models: Iterable[Model] | None = None):
+        self.models: list[Model] = []
+        if models is not None:
+            self.extend(models)
+
+    @classmethod
+    def from_model(cls, model: Model) -> "ModelSet":
+        return cls(model.referenced_models())
+
+    @classmethod
+    def load(cls, path: str | Path) -> "ModelSet":
+        return cls.from_model(Model.load(path))
+
+    def __iter__(self) -> Iterator[Model]:
+        return iter(self.models)
+
+    def __len__(self) -> int:
+        return len(self.models)
+
+    def __contains__(self, model: Model) -> bool:
+        return any(existing is model for existing in self.models)
+
+    def __getitem__(self, index: int) -> Model:
+        return self.models[index]
+
+    def add(self, model: Model) -> Model:
+        if model not in self:
+            self.models.append(model)
+        return model
+
+    def append(self, model: Model) -> None:
+        self.add(model)
+
+    def extend(self, models: Iterable[Model]) -> None:
+        for model in models:
+            self.add(model)
+
+    def validate(self) -> list[tuple[Model, str]]:
+        rendered = [(model, model.to_xml()) for model in self.models]
+        roots: list[tuple[Model, str, ET.Element]] = []
+        errors: list[str] = []
+
+        for model, xml in rendered:
+            file_name = f"{model.name}.uml"
+            try:
+                roots.append((model, file_name, ET.fromstring(xml)))
+            except ET.ParseError as e:
+                errors.append(f"{file_name}: invalid XML: {e}")
+
+        if errors:
+            raise ValueError("Invalid XMI model set:\n- " + "\n- ".join(errors))
+
+        model_files: dict[str, Model] = {}
+        ids_by_file: dict[str, dict[str, ET.Element]] = {}
+        id_locations: dict[str, list[str]] = {}
+
+        for model, file_name, root in roots:
+            if file_name in model_files:
+                errors.append(f"{file_name}: model file name is not unique")
+            model_files[file_name] = model
+
+            ids: dict[str, ET.Element] = {}
+            for el in root.iter():
+                ref_id = xmi_id(el)
+                if not ref_id:
+                    continue
+                if ref_id in ids:
+                    errors.append(f"{file_name}: duplicate xmi:id {ref_id!r}")
+                ids.setdefault(ref_id, el)
+                id_locations.setdefault(ref_id, []).append(file_name)
+            ids_by_file[file_name] = ids
+
+        for ref_id, locations in id_locations.items():
+            if len(locations) > 1:
+                errors.append(
+                    f"xmi:id {ref_id!r} is not unique across the model set: "
+                    + ", ".join(locations)
+                )
+
+        def element_label(el: ET.Element) -> str:
+            parts = [local_name(el.tag)]
+            if ref_id := xmi_id(el):
+                parts.append(f"xmi:id={ref_id!r}")
+            if name := el.get("name"):
+                parts.append(f"name={name!r}")
+            return " ".join(parts)
+
+        def element_type(el: ET.Element) -> str:
+            if value := xmi_type(el):
+                return value
+            tag = local_name(el.tag)
+            return f"uml:{tag}" if tag == "Model" else ""
+
+        def validate_direct_reference(
+            source_file: str,
+            el: ET.Element,
+            attr_name: str,
+            value: str,
+        ) -> None:
+            ref_ids = value.split()
+            if not ref_ids:
+                errors.append(
+                    f"{source_file}: {element_label(el)} {attr_name}={value!r} "
+                    "must contain at least one xmi:id reference"
+                )
+                return
+            if attr_name not in MULTI_REFERENCE_ATTRIBUTES and len(ref_ids) != 1:
+                errors.append(
+                    f"{source_file}: {element_label(el)} {attr_name}={value!r} "
+                    "must contain a single xmi:id reference"
+                )
+            for ref_id in ref_ids:
+                if "#" in ref_id:
+                    errors.append(
+                        f"{source_file}: {element_label(el)} {attr_name}={ref_id!r} "
+                        "must use an href child element for cross-model references"
+                    )
+                    continue
+                if ref_id in ids_by_file[source_file]:
+                    continue
+                other_locations = [
+                    location
+                    for location in id_locations.get(ref_id, [])
+                    if location != source_file
+                ]
+                if other_locations:
+                    errors.append(
+                        f"{source_file}: {element_label(el)} {attr_name}={ref_id!r} "
+                        "references another model directly; use href with a # fragment "
+                        f"to {', '.join(other_locations)}"
+                    )
+                else:
+                    errors.append(
+                        f"{source_file}: {element_label(el)} {attr_name}={ref_id!r} "
+                        "does not resolve within the model set"
+                    )
+
+        def validate_href_reference(source_file: str, el: ET.Element, href: str) -> None:
+            if "#" not in href:
+                errors.append(
+                    f"{source_file}: {element_label(el)} href={href!r} "
+                    "must include a # fragment"
+                )
+                return
+
+            target_file, ref_id = href.rsplit("#", 1)
+            if not target_file or not ref_id:
+                errors.append(
+                    f"{source_file}: {element_label(el)} href={href!r} "
+                    "must include both a model file and an xmi:id fragment"
+                )
+                return
+
+            if target_file == source_file:
+                errors.append(
+                    f"{source_file}: {element_label(el)} href={href!r} "
+                    "references the same model; use a direct xmi:id reference"
+                )
+                return
+
+            target_ids = ids_by_file.get(target_file)
+            if target_ids is None:
+                errors.append(
+                    f"{source_file}: {element_label(el)} href={href!r} "
+                    f"references model file {target_file!r}, which is not in the model set"
+                )
+                return
+
+            target = target_ids.get(ref_id)
+            if target is None:
+                if ref_id in ids_by_file[source_file]:
+                    errors.append(
+                        f"{source_file}: {element_label(el)} href={href!r} "
+                        "references the same model; use a direct xmi:id reference"
+                    )
+                elif ref_id in id_locations:
+                    errors.append(
+                        f"{source_file}: {element_label(el)} href={href!r} "
+                        f"points at the wrong model file; {ref_id!r} exists in "
+                        + ", ".join(id_locations[ref_id])
+                    )
+                else:
+                    errors.append(
+                        f"{source_file}: {element_label(el)} href={href!r} "
+                        "does not resolve within the model set"
+                    )
+                return
+
+            expected_type = el.get(XMI.type)
+            actual_type = element_type(target)
+            if expected_type and actual_type and expected_type != actual_type:
+                errors.append(
+                    f"{source_file}: {element_label(el)} href={href!r} has "
+                    f"xmi:type {expected_type!r}, but target {ref_id!r} is {actual_type!r}"
+                )
+
+        for _, file_name, root in roots:
+            for el in root.iter():
+                for attr_name, value in el.attrib.items():
+                    if attr_name in REFERENCE_ATTRIBUTES | MULTI_REFERENCE_ATTRIBUTES:
+                        validate_direct_reference(file_name, el, attr_name, value)
+                    elif attr_name == XMI.idref:
+                        validate_direct_reference(file_name, el, "xmi:idref", value)
+
+                if local_name(el.tag) not in REFERENCE_ELEMENTS:
+                    continue
+                if href := el.get("href"):
+                    validate_href_reference(file_name, el, href)
+                if el.get("href") is None and el.get(XMI.idref) is None:
+                    errors.append(
+                        f"{file_name}: {element_label(el)} is a reference element "
+                        "but has neither href nor xmi:idref"
+                    )
+
+        if errors:
+            raise ValueError("Invalid XMI model set:\n- " + "\n- ".join(errors))
+
+        return rendered
+
+    def save(self, directory: str | Path | None = None) -> None:
+        rendered = self.validate()
+        directory = Path(directory) if directory is not None else None
+        for model, xml in rendered:
+            path = (
+                directory / f"{model.name}.uml"
+                if directory is not None
+                else Path(f"{model.name}.uml")
+            )
+            tmp_path = path.with_name(f"{path.name}.tmp")
+            with tmp_path.open("w", encoding="utf-8") as f:
+                f.write(xml)
+            tmp_path.replace(path)

@@ -79,6 +79,7 @@ class nothing_deprecated_entity_provider(deprecated_entity_provider):
 
 class converter:
     M : xmi.Model
+    models: xmi.ModelSet
 
     def __init__(self, package_resolver : package_resolver, schema_name, filepath : Optional[str | Path] = None):
         self.schema_name = schema_name
@@ -86,12 +87,11 @@ class converter:
             self.M = xmi.Model.load(filepath)
         else:
             self.M = xmi.Model(schema_name)
-        self.models = list(self.M.referenced_models())
+        self.models = xmi.ModelSet.from_model(self.M)
         self.package_resolver = package_resolver
 
     def add_model(self, model: xmi.Model) -> None:
-        if model not in self.models:
-            self.models.append(model)
+        self.models.add(model)
 
     def pkg(self, item_name : str):
         c = self.M
@@ -417,8 +417,7 @@ class converter:
                 self.pkg(pdef.name).dependency(cls, ref)
 
     def save(self):
-        for m in self.models:
-            m.save()
+        self.models.save()
 
 if __name__ == "__main__":
     import argparse
