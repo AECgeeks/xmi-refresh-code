@@ -876,6 +876,19 @@ class Model(Namespace):
                         ae.set("isDerived", "true")
                     if a.association is not None:
                         self.ref(ae, "association", a.association)
+
+                    if a.comment is not None:
+                        c = ET.SubElement(
+                            ae,
+                            "ownedComment",
+                            {
+                                XMI.type: "uml:Comment",
+                                XMI.id: f"{a.xmi_id}_comment_0",
+                            },
+                        )
+                        body = ET.SubElement(c, "body")
+                        body.text = a.comment
+
                     ET.SubElement(
                         ae,
                         "lowerValue",
@@ -908,18 +921,7 @@ class Model(Namespace):
                         lang.text = "EXPRESS"
                         body = ET.SubElement(dv, "body")
                         body.text = a.derived
-                    if a.comment is not None:
-                        c = ET.SubElement(
-                            ae,
-                            "ownedComment",
-                            {
-                                XMI.type: "uml:Comment",
-                                XMI.id: f"{a.xmi_id}_comment_0",
-                            },
-                        )
-                        body = ET.SubElement(c, "body")
-                        body.text = a.comment
-
+                    
             elif isinstance(elt, Enumeration):
                 ee = ET.SubElement(
                     el,
@@ -940,7 +942,7 @@ class Model(Namespace):
                             "name": lit,
                         },
                     )
-            
+
             elif isinstance(elt, Dependency):
                 attrs = {
                     XMI.type: "uml:Dependency",
