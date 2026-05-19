@@ -138,38 +138,62 @@ def build_definition_set(
     penums: dict[str, list[str]],
     ifc_version: str,
     schema_location: str,
+    qto_schema_location: str,
     include_definitions: bool,
 ) -> psd.DefinitionSet:
-    if not set_name.startswith("Pset_"):
-        raise ValueError(f"{set_name} is not a Pset_* name; only PropertySetDef output is currently supported")
-
     applicable_classes = unique_in_order(
         item
         for row in rows
         for item in split_applicable_types(row.applicable_type)
     )
 
-    return psd.DefinitionSet(
-        root_tag="PropertySetDef",
-        template_type="PSET_TYPEDRIVENOVERRIDE",
-        schema_location=schema_location,
-        ifc_version=psd.IfcVersion(version=ifc_version),
-        name=set_name,
-        definition="",
-        applicability="",
-        applicable_classes=applicable_classes,
-        applicable_type_value=",".join(applicable_classes),
-        items_container_tag="PropertyDefs",
-        item_tag="PropertyDef",
-        items=[
-            psd.PropertyDef(
-                name=row.property_name,
-                definition=row.definition if include_definitions else "",
-                property_type=property_type_from_cell(row, penums),
-            )
-            for row in rows
-        ],
-    )
+    if set_name.startswith("Pset_"):
+        return psd.DefinitionSet(
+            root_tag="PropertySetDef",
+            template_type="PSET_TYPEDRIVENOVERRIDE",
+            schema_location=schema_location,
+            ifc_version=psd.IfcVersion(version=ifc_version),
+            name=set_name,
+            definition="",
+            applicability="",
+            applicable_classes=applicable_classes,
+            applicable_type_value=",".join(applicable_classes),
+            items_container_tag="PropertyDefs",
+            item_tag="PropertyDef",
+            items=[
+                psd.PropertyDef(
+                    name=row.property_name,
+                    definition=row.definition if include_definitions else "",
+                    property_type=property_type_from_cell(row, penums),
+                )
+                for row in rows
+            ],
+        )
+
+    if set_name.startswith("Qto_"):
+        return psd.DefinitionSet(
+            root_tag="QtoSetDef",
+            template_type="QTO_TYPEDRIVENOVERRIDE",
+            schema_location=qto_schema_location,
+            ifc_version=psd.IfcVersion(version=ifc_version),
+            name=set_name,
+            definition="",
+            applicability="",
+            applicable_classes=applicable_classes,
+            applicable_type_value=",".join(applicable_classes),
+            items_container_tag="QtoDefs",
+            item_tag="QtoDef",
+            items=[
+                psd.QtoDef(
+                    name=row.property_name,
+                    definition=row.definition if include_definitions else "",
+                    qto_type=row.data_type,
+                )
+                for row in rows
+            ],
+        )
+
+    raise ValueError(f"{set_name} is not a Pset_* or Qto_* name")
 
 
 def convert(
@@ -179,6 +203,7 @@ def convert(
     penum_sheet: str,
     ifc_version: str,
     schema_location: str,
+    qto_schema_location: str,
     include_definitions: bool,
 ) -> int:
     workbook = load_workbook(xlsx_path, read_only=True, data_only=True)
@@ -200,6 +225,7 @@ def convert(
             penums=penums,
             ifc_version=ifc_version,
             schema_location=schema_location,
+            qto_schema_location=qto_schema_location,
             include_definitions=include_definitions,
         )
         psd.write(definition_set, output_dir / set_name)
@@ -215,6 +241,7 @@ def main() -> None:
     parser.add_argument("--penum-sheet", default=PENUM_SHEET, help="Workbook sheet containing PEnum rows")
     parser.add_argument("--ifc-version", default=psd.DEFAULT_IFC_VERSION, help="IfcVersion value for generated PSD files")
     parser.add_argument("--schema-location", default=psd.DEFAULT_SCHEMA_LOCATION, help="PSD schema location")
+    parser.add_argument("--qto-schema-location", default=psd.DEFAULT_QTO_SCHEMA_LOCATION, help="QTO schema location")
     parser.add_argument(
         "--include-definitions",
         action="store_true",
@@ -229,6 +256,7 @@ def main() -> None:
         penum_sheet=args.penum_sheet,
         ifc_version=args.ifc_version,
         schema_location=args.schema_location,
+        qto_schema_location=args.qto_schema_location,
         include_definitions=args.include_definitions,
     )
     print(f"Wrote {count} PSD XML files to {args.output_dir}")

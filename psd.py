@@ -10,6 +10,7 @@ from xml.dom import minidom
 XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
 XSD_NS = "http://www.w3.org/2001/XMLSchema"
 DEFAULT_SCHEMA_LOCATION = "http://buildingSMART-tech.org/xml/psd/PSD_IFC4.xsd"
+DEFAULT_QTO_SCHEMA_LOCATION = "http://buildingSMART-tech.org/xml/psd/QTO_IFC4.xsd"
 DEFAULT_IFC_VERSION = "IFC4X3_DEV_c24e347b"
 
 ET.register_namespace("xsi", XSI_NS)
