@@ -429,8 +429,8 @@ class Model(Namespace):
         by_id: dict[str, Base] = {model.xmi_id: model}
         class_elems: list[tuple[Class, ET.Element]] = []
         datatype_elems: list[tuple[DataType, ET.Element]] = []
-        association_elems: list[tuple[Namespace, ET.Element]] = []
-        dependency_elems: list[tuple[Namespace, ET.Element]] = []
+        association_elems: list[tuple[Namespace, ET.Element, int]] = []
+        dependency_elems: list[tuple[Namespace, ET.Element, int]] = []
 
         def load_import(imported_package: str) -> Namespace | None:
             if base_path is None or "#" not in imported_package:
@@ -560,9 +560,9 @@ class Model(Namespace):
                     ns.elements.append(constraint)
                     register(constraint)
                 elif kind == "uml:Association":
-                    association_elems.append((ns, el))
+                    association_elems.append((ns, el, len(ns.elements)))
                 elif kind == "uml:Dependency":
-                    dependency_elems.append((ns, el))
+                    dependency_elems.append((ns, el, len(ns.elements)))
 
             for el in ns_el:
                 if local_name(el.tag) != "packageImport":
@@ -618,7 +618,9 @@ class Model(Namespace):
                 klass.attributes.append(constraint)
                 register(constraint)
 
-        for ns, el in association_elems:
+        _to_insert: list[tuple[Namespace, int, Base]] = []
+
+        for ns, el, idx in association_elems:
             assoc_id = xmi_id(el)
             owned_ends = children(el, "ownedEnd")
             owning_attribute = next(iter(attributes_by_association.get(assoc_id, [])), None)
@@ -671,10 +673,10 @@ class Model(Namespace):
                     owner=source,
                     xmi_id_=assoc_id or None,
                 )
-            ns.elements.append(association)
+            _to_insert.append((ns, idx, association))
             register(association)
 
-        for ns, el in dependency_elems:
+        for ns, el, idx in dependency_elems:
             source = ref_obj(el, "client")
             target = ref_obj(el, "supplier")
             if isinstance(source, UnionType):
@@ -687,8 +689,14 @@ class Model(Namespace):
                     owner=ns,
                     xmi_id_=xmi_id(el) or None,
                 )
-                ns.elements.append(dependency)
+                _to_insert.append((ns, idx, dependency))
                 register(dependency)
+
+        for _, (ns, idx, obj) in sorted(
+            enumerate(_to_insert),
+            key=lambda t: (id(t[1][0]), -t[1][1], -t[0]),
+        ):
+            ns.elements.insert(idx, obj)
 
         model._reserve_ids_from_xml(root)
         return model
