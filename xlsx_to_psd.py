@@ -229,7 +229,7 @@ def convert(
             qto_schema_location=qto_schema_location,
             include_definitions=include_definitions,
         )
-        psd.write(definition_set, output_dir / set_name)
+        psd.write(definition_set, output_dir / (set_name + ".xml"))
 
     return len(groups)
 
