@@ -41,8 +41,20 @@ def _read_modify_rows(path: str | Path, sheet_name: str) -> list[list[str]]:
             try:
                 with p.open(encoding=encoding, newline="") as f:
                     reader = csv.reader(f)
-                    next(reader, None)  # header row
-                    return [list(row) for row in reader]
+                    header = next(reader, None) or []
+                    rows = [list(row) for row in reader]
+                    # 2_for_later_update.csv (2026-05-19 vintage) inserts a
+                    # "Localised definition to use in revision commit" column at
+                    # position 7, pushing new_pset to 8 and new_type to 9.
+                    # Drop it so positional indices match the legacy xlsx layout
+                    # (where new_pset is at 7, new_type at 8).
+                    if any("localised definition" in (h or "").lower() for h in header):
+                        idx = next(
+                            i for i, h in enumerate(header)
+                            if "localised definition" in (h or "").lower()
+                        )
+                        rows = [r[:idx] + r[idx + 1:] for r in rows]
+                    return rows
             except UnicodeDecodeError:
                 continue
         raise UnicodeDecodeError("utf-8/cp1252", b"", 0, 0, f"Could not decode {p}")
