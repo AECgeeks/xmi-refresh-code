@@ -5,6 +5,15 @@ from pathlib import Path
 import sys
 from typing import Callable, Generic, Optional, TypeVar
 import xml.etree.ElementTree as ET
+from xml.dom import minidom
+
+XSI_NS = "http://www.w3.org/2001/XMLSchema-instance"
+XSD_NS = "http://www.w3.org/2001/XMLSchema"
+DEFAULT_SCHEMA_LOCATION = "http://buildingSMART-tech.org/xml/psd/PSD_IFC4.xsd"
+DEFAULT_QTO_SCHEMA_LOCATION = "http://buildingSMART-tech.org/xml/psd/QTO_IFC4.xsd"
+DEFAULT_IFC_VERSION = "IFC4X3_DEV_c24e347b"
+
+ET.register_namespace("xsi", XSI_NS)
 
 def local_name(tag: str) -> str:
     return tag.split("}", 1)[-1] if "}" in tag else tag
@@ -144,6 +153,111 @@ def parse_property_def(elem: ET.Element) -> PropertyDef:
         definition=text_of(child(elem, "Definition")),
         property_type=parse_property_type(pt),
     )
+
+
+def _text_child(parent: ET.Element, tag: str, text: str = "") -> ET.Element:
+    elem = ET.SubElement(parent, tag)
+    elem.text = text
+    return elem
+
+
+def property_type_to_element(property_type: PropertyType) -> ET.Element:
+    elem = ET.Element("PropertyType")
+
+    if isinstance(property_type, PropertySingle):
+        variant = ET.SubElement(elem, "TypePropertySingleValue")
+        ET.SubElement(variant, "DataType", {"type": property_type.data_type})
+        return elem
+
+    if isinstance(property_type, PropertyList):
+        variant = ET.SubElement(elem, "TypePropertyListValue")
+        list_value = ET.SubElement(variant, "ListValue")
+        ET.SubElement(list_value, "DataType", {"type": property_type.data_type})
+        return elem
+
+    if isinstance(property_type, PropertyEnum):
+        variant = ET.SubElement(elem, "TypePropertyEnumeratedValue")
+        enum_list = ET.SubElement(variant, "EnumList", {"name": property_type.enum_name})
+        for item in property_type.enum_items:
+            _text_child(enum_list, "EnumItem", item)
+        return elem
+
+    if isinstance(property_type, PropertyReference):
+        ET.SubElement(elem, "TypePropertyReferenceValue", {"reftype": property_type.ref_type})
+        return elem
+
+    if isinstance(property_type, PropertyBounded):
+        variant = ET.SubElement(elem, "TypePropertyBoundedValue")
+        ET.SubElement(variant, "DataType", {"type": property_type.data_type})
+        return elem
+
+    if isinstance(property_type, PropertyTable):
+        variant = ET.SubElement(elem, "TypePropertyTableValue")
+        defining = ET.SubElement(variant, "DefiningValue")
+        ET.SubElement(defining, "DataType", {"type": property_type.defining})
+        defined = ET.SubElement(variant, "DefinedValue")
+        ET.SubElement(defined, "DataType", {"type": property_type.defined})
+        return elem
+
+    raise TypeError(f"Unsupported property type {type(property_type).__name__}")
+
+
+def property_def_to_element(prop: PropertyDef) -> ET.Element:
+    elem = ET.Element("PropertyDef")
+    _text_child(elem, "Name", prop.name)
+    _text_child(elem, "Definition", prop.definition)
+    elem.append(property_type_to_element(prop.property_type))
+    return elem
+
+
+def qto_def_to_element(qto: QtoDef) -> ET.Element:
+    elem = ET.Element("QtoDef")
+    _text_child(elem, "Name", qto.name)
+    _text_child(elem, "Definition", qto.definition)
+    _text_child(elem, "QtoType", qto.qto_type)
+    return elem
+
+
+def to_element(definition_set: DefinitionSet) -> ET.Element:
+    root = ET.Element(
+        definition_set.root_tag,
+        {
+            "xmlns:xsd": XSD_NS,
+            "templatetype": definition_set.template_type,
+            f"{{{XSI_NS}}}noNamespaceSchemaLocation": definition_set.schema_location or DEFAULT_SCHEMA_LOCATION,
+        },
+    )
+
+    ET.SubElement(root, "IfcVersion", {"version": definition_set.ifc_version.version})
+    _text_child(root, "Name", definition_set.name)
+    _text_child(root, "Definition", definition_set.definition)
+    _text_child(root, "Applicability", definition_set.applicability)
+
+    applicable_classes = ET.SubElement(root, "ApplicableClasses")
+    for class_name in definition_set.applicable_classes:
+        _text_child(applicable_classes, "ClassName", class_name)
+
+    _text_child(root, "ApplicableTypeValue", definition_set.applicable_type_value)
+
+    items_container = ET.SubElement(root, definition_set.items_container_tag)
+    for item in definition_set.items:
+        if isinstance(item, PropertyDef):
+            items_container.append(property_def_to_element(item))
+        elif isinstance(item, QtoDef):
+            items_container.append(qto_def_to_element(item))
+        else:
+            raise TypeError(f"Unsupported definition item {type(item).__name__}")
+
+    return root
+
+
+def to_xml(definition_set: DefinitionSet) -> str:
+    raw = ET.tostring(to_element(definition_set), encoding="utf-8")
+    return minidom.parseString(raw).toprettyxml(indent="  ")
+
+
+def write(definition_set: DefinitionSet, path: str | Path) -> None:
+    Path(path).write_text(to_xml(definition_set), encoding="utf-8")
 
 
 # ----------------------------

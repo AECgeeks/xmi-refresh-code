@@ -16,6 +16,9 @@ import xmi_parse
 
 w = ifcopenshell.ifcopenshell_wrapper
 
+MODIFY_WORKBOOK = Path("data") / "4.4 properties.xlsx"
+MODIFY_SHEET = "2 - For later update"
+
 def attribute_ref(a):
     if isinstance(a, w.named_type):
         return a.declared_type().name()
@@ -77,8 +80,26 @@ class nothing_deprecated_entity_provider(deprecated_entity_provider):
     def is_deprecated(self, entity_name) -> bool:
         return False
 
+def cell_text(value) -> str:
+    if value is None:
+        return ""
+    if isinstance(value, bool):
+        return "TRUE" if value else "FALSE"
+    return str(value).strip()
+
+def lookup_by_name(model: xmi.Model, name: str):
+    element = model.by_name(name)
+    if element is None:
+        raise KeyError(name)
+    return element
+
+def lookup_attribute(cls: xmi.Class, name: str):
+    attrs = {attribute.name: attribute for attribute in cls.attributes}
+    return attrs[name]
+
 class converter:
     M : xmi.Model
+    models: xmi.ModelSet
 
     def __init__(self, package_resolver : package_resolver, schema_name, filepath : Optional[str | Path] = None):
         self.schema_name = schema_name
@@ -86,12 +107,11 @@ class converter:
             self.M = xmi.Model.load(filepath)
         else:
             self.M = xmi.Model(schema_name)
-        self.models = list(self.M.referenced_models())
+        self.models = xmi.ModelSet.from_model(self.M)
         self.package_resolver = package_resolver
 
     def add_model(self, model: xmi.Model) -> None:
-        if model not in self.models:
-            self.models.append(model)
+        self.models.add(model)
 
     def pkg(self, item_name : str):
         c = self.M
@@ -416,9 +436,49 @@ class converter:
             for ref in classes_cleaned:
                 self.pkg(pdef.name).dependency(cls, ref)
 
+    def modify_properties(self, workbook_path: str | Path, sheet_name: str = MODIFY_SHEET):
+        from openpyxl import load_workbook
+
+        workbook = load_workbook(workbook_path, read_only=True, data_only=True)
+        try:
+            rows = [
+                [cell_text(value) for value in row]
+                for row in workbook[sheet_name].iter_rows(min_row=2, values_only=True)
+            ]
+        finally:
+            workbook.close()
+
+        pset_renames = []
+        seen_pset_renames = set()
+        for row in rows:
+            old_pset = row[2]
+            new_pset = row[7]
+            if old_pset != new_pset and (old_pset, new_pset) not in seen_pset_renames:
+                seen_pset_renames.add((old_pset, new_pset))
+                pset_renames.append((old_pset, new_pset))
+
+        for old_pset, new_pset in pset_renames:
+            lookup_by_name(self.M, old_pset).name = new_pset
+
+        for row in rows:
+            property_name = row[0]
+            old_type = row[3]
+            new_pset = row[7]
+            new_type = row[8]
+            if old_type != new_type:
+                cls = lookup_by_name(self.M, new_pset)
+                lookup_attribute(cls, property_name).type = lookup_by_name(self.M, new_type)
+
+        for row in rows:
+            old_property = row[0]
+            new_property = row[5]
+            new_pset = row[7]
+            if old_property != new_property:
+                cls = lookup_by_name(self.M, new_pset)
+                lookup_attribute(cls, old_property).name = new_property
+
     def save(self):
-        for m in self.models:
-            m.save()
+        self.models.save()
 
 if __name__ == "__main__":
     import argparse
@@ -429,8 +489,13 @@ if __name__ == "__main__":
     parser.add_argument('--ea', help='Enterprise Architect .xmi file to resolve containing package and deprecated entities')
     parser.add_argument('--json', help='JSON file containing a single top-level array of deprecated entity names')
     parser.add_argument('--psd', help='Directory, glob pattern or single XML file path for property set definitions')
+    parser.add_argument('--modify', nargs='?', const=str(MODIFY_WORKBOOK), help='Apply property updates from the workbook')
+    parser.add_argument('--modify-sheet', default=MODIFY_SHEET, help='Workbook sheet to use with --modify')
     parser.add_argument('--output', help='Output UML file')
     args = parser.parse_args()
+
+    if args.modify and not args.input:
+        parser.error('--modify requires --input')
 
     pr, de = None, None
     if args.ea:
@@ -455,5 +520,7 @@ if __name__ == "__main__":
         ms = cv.convert_express_to_xmi(args.express, de, name_filter=nf)
     if args.psd:
         cv.write_properties(args.psd)
+    if args.modify:
+        cv.modify_properties(args.modify, args.modify_sheet)
     cv.save()
     os._exit(0)
