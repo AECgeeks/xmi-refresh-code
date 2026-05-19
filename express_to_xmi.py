@@ -1,4 +1,5 @@
 from collections import defaultdict
+import csv
 import glob
 import json
 import os
@@ -18,6 +19,43 @@ w = ifcopenshell.ifcopenshell_wrapper
 
 MODIFY_WORKBOOK = Path("data") / "4.4 properties.xlsx"
 MODIFY_SHEET = "2 - For later update"
+
+
+def _read_modify_rows(path: str | Path, sheet_name: str) -> list[list[str]]:
+    """Read property-modify rows from either an .xlsx workbook or a .csv file.
+
+    Returns rows from row 2 onwards (skipping the header) in the same shape
+    as openpyxl.iter_rows(values_only=True) — i.e. a list of column-string lists.
+    The column layout for both inputs matches the "2 - For later update" sheet:
+      0 initial_property_name
+      2 initial_pset
+      3 initial_type
+      5 new_property_name
+      7 new_pset
+      8 new_type
+    The CSV equivalent (2_for_later_update.csv) has the same column order.
+    """
+    p = Path(path)
+    if p.suffix.lower() == ".csv":
+        for encoding in ("utf-8-sig", "cp1252"):
+            try:
+                with p.open(encoding=encoding, newline="") as f:
+                    reader = csv.reader(f)
+                    next(reader, None)  # header row
+                    return [list(row) for row in reader]
+            except UnicodeDecodeError:
+                continue
+        raise UnicodeDecodeError("utf-8/cp1252", b"", 0, 0, f"Could not decode {p}")
+
+    from openpyxl import load_workbook
+    workbook = load_workbook(p, read_only=True, data_only=True)
+    try:
+        return [
+            [cell_text(value) for value in row]
+            for row in workbook[sheet_name].iter_rows(min_row=2, values_only=True)
+        ]
+    finally:
+        workbook.close()
 
 def attribute_ref(a):
     if isinstance(a, w.named_type):
@@ -437,16 +475,7 @@ class converter:
                 self.pkg(pdef.name).dependency(cls, ref)
 
     def modify_properties(self, workbook_path: str | Path, sheet_name: str = MODIFY_SHEET):
-        from openpyxl import load_workbook
-
-        workbook = load_workbook(workbook_path, read_only=True, data_only=True)
-        try:
-            rows = [
-                [cell_text(value) for value in row]
-                for row in workbook[sheet_name].iter_rows(min_row=2, values_only=True)
-            ]
-        finally:
-            workbook.close()
+        rows = _read_modify_rows(workbook_path, sheet_name)
 
         pset_renames = []
         seen_pset_renames = set()
@@ -458,7 +487,10 @@ class converter:
                 pset_renames.append((old_pset, new_pset))
 
         for old_pset, new_pset in pset_renames:
-            lookup_by_name(self.M, old_pset).name = new_pset
+            try:
+                lookup_by_name(self.M, old_pset).name = new_pset
+            except KeyError:
+                continue
 
         for row in rows:
             property_name = row[0]
@@ -466,16 +498,22 @@ class converter:
             new_pset = row[7]
             new_type = row[8]
             if old_type != new_type:
-                cls = lookup_by_name(self.M, new_pset)
-                lookup_attribute(cls, property_name).type = lookup_by_name(self.M, new_type)
+                try:
+                    cls = lookup_by_name(self.M, new_pset)
+                    lookup_attribute(cls, property_name).type = lookup_by_name(self.M, new_type)
+                except KeyError:
+                    continue
 
         for row in rows:
             old_property = row[0]
             new_property = row[5]
             new_pset = row[7]
             if old_property != new_property:
-                cls = lookup_by_name(self.M, new_pset)
-                lookup_attribute(cls, old_property).name = new_property
+                try:
+                    cls = lookup_by_name(self.M, new_pset)
+                    lookup_attribute(cls, old_property).name = new_property
+                except KeyError:
+                    continue
 
     def save(self):
         self.models.save()
@@ -489,8 +527,8 @@ if __name__ == "__main__":
     parser.add_argument('--ea', help='Enterprise Architect .xmi file to resolve containing package and deprecated entities')
     parser.add_argument('--json', help='JSON file containing a single top-level array of deprecated entity names')
     parser.add_argument('--psd', help='Directory, glob pattern or single XML file path for property set definitions')
-    parser.add_argument('--modify', nargs='?', const=str(MODIFY_WORKBOOK), help='Apply property updates from the workbook')
-    parser.add_argument('--modify-sheet', default=MODIFY_SHEET, help='Workbook sheet to use with --modify')
+    parser.add_argument('--modify', nargs='?', const=str(MODIFY_WORKBOOK), help='Apply property updates from a workbook (.xlsx) or CSV file (.csv)')
+    parser.add_argument('--modify-sheet', default=MODIFY_SHEET, help='Workbook sheet to use with --modify (ignored for CSV input)')
     parser.add_argument('--output', help='Output UML file')
     args = parser.parse_args()
 
