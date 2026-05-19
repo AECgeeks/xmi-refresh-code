@@ -54,12 +54,13 @@ def normalize(value: str) -> str:
 def load_upload_rows(rows: list[list[str]]) -> list[UploadRow]:
     upload_rows: list[UploadRow] = []
     for row_number, row in enumerate(rows[1:], start=2):
-        padded = row + [""] * max(0, 5 - len(row))
+        padded = row + [""] * max(0, 6 - len(row))
         property_name = normalize(padded[0])
         applicable_type = normalize(padded[1])
         set_name = normalize(padded[2])
         definition = normalize(padded[3])
-        data_type = normalize(padded[4])
+        definition_extension = normalize(padded[4])
+        data_type = normalize(padded[5])
 
         if not any((property_name, applicable_type, set_name, definition, data_type)):
             continue
