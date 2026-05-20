@@ -66,19 +66,19 @@ def generate_id(obj) -> str:
     if isinstance(obj, Enumeration):
         return f"en_{slug(obj.name)}"
     if isinstance(obj, Attribute):
-        return f"at_{obj.owner.name}_{slug(obj.name)}"
+        return f"at_{slug(obj.owner.name)}_{slug(obj.name)}"
     if isinstance(obj, DirectedAssociation):
         if '_' in slug(obj.name):
             return f"as_{slug(obj.name)}"
         else:
-            return f"as_{obj.source.name}_{slug(obj.name)}"
+            return f"as_{slug(obj.source.name)}_{slug(obj.name)}"
     if isinstance(obj, Dependency):
-        return f"dp_{obj.source.name}_{obj.target.name}"
+        return f"dp_{slug(obj.source.name)}_{slug(obj.target.name)}"
     if isinstance(obj, UnionType):
         return f"un_{slug(obj.name)}"
     if isinstance(obj, Constraint):
         if not obj.owner.xmi_id.startswith("pk_"):
-            own = obj.owner.name + "_"
+            own = slug(obj.owner.name) + "_"
         else:
             own = ""
         return f"ct_{own}{slug(obj.name)}"
