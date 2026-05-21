@@ -880,9 +880,6 @@ class Model(Namespace):
                     }
                     ae = ET.SubElement(ce, "ownedAttribute", attrs)
                     
-                    if a.derived is not None:
-                        ae.set("isDerived", "true")
-
                     if a.comment is not None:
                         c = ET.SubElement(
                             ae,
@@ -899,6 +896,9 @@ class Model(Namespace):
 
                     if a.association is not None:
                         self.ref(ae, "association", a.association)
+
+                    if a.derived is not None:
+                        ae.set("isDerived", "true")
 
                     ET.SubElement(
                         ae,
