@@ -24,7 +24,6 @@ Per `local/pipeline-changes.md` item E (Markdown scaffolding) and Thomas's
 2026-05-01 ask about reducing the manual MD authoring burden.
 """
 import argparse
-import csv
 import glob
 import os
 import re
@@ -33,6 +32,8 @@ from collections import defaultdict
 from dataclasses import dataclass
 from pathlib import Path
 from xml.dom import minidom
+
+from xmi import Attribute, Class, Constraint, DataType, Enumeration, Model
 
 
 # ---------------------------------------------------------------------------
@@ -468,219 +469,38 @@ def _synth_rule_doc(entity_name, rule_name):
     return None
 
 
-def _attrs(el):
-    return {a.name: a.value for a in (el.attributes or {}).values()}
-
-
 def _children_by_tag(parent, tag):
     return [c for c in parent.childNodes if c.nodeType == c.ELEMENT_NODE and c.tagName == tag]
 
 
-def _walk_classes(doc):
-    """Yield every <packagedElement> with xmi:type."""
-    for el in doc.getElementsByTagName("packagedElement"):
-        t = el.getAttribute("xmi:type")
-        if t:
-            yield el
-
-
-def _find_entity(doc, name):
-    for el in _walk_classes(doc):
-        if el.getAttribute("name") == name:
-            return el
-    return None
-
-
-def _supertype_name(entity_el):
-    """Return the supertype's name if findable via <generalization>."""
-    for g in _children_by_tag(entity_el, "generalization"):
-        for gen in _children_by_tag(g, "general"):
-            href = gen.getAttribute("href")
-            if href and "#" in href:
-                # <general href="OtherFile.uml#cl_IfcFoo"/>
-                _, frag = href.split("#", 1)
-                return frag.replace("cl_", "").replace("dt_", "")
-        # attribute form: <generalization general="cl_..."/>
-        gen_attr = g.getAttribute("general")
-        if gen_attr:
-            return gen_attr.replace("cl_", "").replace("dt_", "")
-    return None
-
-
-def _own_attrs(entity_el):
-    """Return [(name, type_name)] for entity attributes."""
-    out = []
-    for a in _children_by_tag(entity_el, "ownedAttribute"):
-        nm = a.getAttribute("name")
-        if not nm:
-            continue
-        # type may be attribute-form ("type=en_X") or child-href form
-        ty = a.getAttribute("type")
-        if not ty:
-            for tn in _children_by_tag(a, "type"):
-                href = tn.getAttribute("href")
-                if href and "#" in href:
-                    ty = href.split("#", 1)[1]
-                    break
-        ty = ty.replace("en_", "").replace("dt_", "").replace("cl_", "") if ty else "(unknown)"
-        out.append((nm, ty))
-    return out
-
-
-def _where_rules(entity_el):
-    """Return [(name, body_first_line)] for owned WHERE rules."""
-    rules = []
-    for r in _children_by_tag(entity_el, "ownedRule"):
-        rname = r.getAttribute("name")
-        body = ""
-        for spec in _children_by_tag(r, "specification"):
-            for bn in _children_by_tag(spec, "body"):
-                if bn.childNodes:
-                    body = (bn.childNodes[0].nodeValue or "").strip().splitlines()[0][:140]
-                    break
-        rules.append((rname, body))
-    return rules
-
-
-def _enum_literals(entity_el):
-    out = []
-    for lit in _children_by_tag(entity_el, "ownedLiteral"):
-        nm = lit.getAttribute("name")
-        if nm:
-            out.append(nm)
-    return out
-
-
-def _build_supertype_lookup(uml_dir):
-    """Build {entity_name: supertype_name} dict across all .uml files in uml_dir."""
-    lookup = {}
-    for uml_file in sorted(glob.glob(os.path.join(uml_dir, "*.uml"))):
-        try:
-            doc = minidom.parse(uml_file)
-        except Exception:
-            continue
-        for el in _walk_classes(doc):
-            if el.getAttribute("xmi:type") == "uml:Class":
-                nm = el.getAttribute("name")
-                sup = _supertype_name(el)
-                if nm and nm not in lookup:
-                    lookup[nm] = sup
-    return lookup
-
-
-def _supertype_chain(entity_name, lookup):
-    """Return ordered chain: [entity, supertype, super-supertype, ...] until root."""
-    chain = [entity_name]
-    current = entity_name
-    seen = {entity_name}
-    while current in lookup and lookup[current]:
-        sup = lookup[current]
-        if sup in seen:
-            break
-        chain.append(sup)
-        seen.add(sup)
-        current = sup
-    return chain
-
-
-def _filename_to_heading(csv_filename):
-    """PropertySetsforObjects.csv → 'Property Sets for Objects'.
-
-    Handles CamelCase + lowercase prepositions + digit boundaries.
-    Best-effort: matches the convention used by the HTML builder.
-    """
-    name = csv_filename.replace(".csv", "")
-    # Pre-split standalone prepositions (must be lowercase island between
-    # camelcase boundaries). Only "for", "to", "with", "and", "of" are common
-    # in canonical names. Avoid "on"/"in" — too many false positives
-    # (e.g. "Classification" → "Classificati on Association").
-    for prep in ("for", "to", "with", "and", "of"):
-        name = re.sub(r"([a-z])" + prep + r"([A-Z])", r"\1 " + prep + r" \2", name)
-    # CamelCase boundaries
-    name = re.sub(r"([a-z])([A-Z])", r"\1 \2", name)
-    name = re.sub(r"([A-Z])([A-Z][a-z])", r"\1 \2", name)
-    # Digit-after-lowercase boundary (Axis3DGeometry: don't split 3D itself)
-    name = re.sub(r"([a-z])(\d)", r"\1 \2", name)
-    return name
-
-
-# Concept names that are ALWAYS shown when bound to the entity or any
-# supertype (vs noisy body-geometry variants). Empirically the top of
-# upstream entity MDs.
-_PRIORITY_CONCEPTS = {
-    "Property Sets for Objects",
-    "Object Typing",
-    "Quantity Sets",
-    "Material Set",
-    "Material Profile Set Usage",
-    "Material Layer Set Usage",
-    "Material Single",
-    "Material Constituent Set",
-    "Spatial Containment",
-    "Product Assignment",
-    "Product Local Placement",
-    "Element Composition",
-    "Element Decomposition",
-    "Port Nesting",
-    "Aggregation",
-}
-
-# Body-geometry variants that bind to most generic supertypes — too many
-# to emit them all; user picks the one matching their entity's geometry.
-# Treated as a single "family" — at most one shown in the scaffold.
-_BODY_GEOMETRY_FAMILY = "Body"
-
-
-def _applicable_concepts(uml_dir, supertype_chain, max_results=12):
-    """For each MVD CSV under <uml_dir>/mvd/GeneralUsage/, return concepts where any
-    entity in supertype_chain appears in the ApplicableEntity column.
-
-    Filters: prioritise concepts bound to the entity itself or its direct
-    supertype; cap at max_results. Returns list of (concept_heading, inherited_from).
-    """
-    mvd_dir = os.path.join(uml_dir, "mvd", "GeneralUsage")
-    if not os.path.isdir(mvd_dir):
+def _model_attrs(entity):
+    """Return [(name, type_name)] for xmi.py Class attributes."""
+    if not isinstance(entity, Class):
         return []
-    chain_set = set(supertype_chain)
-    raw = []  # (heading, inherited_from, chain_idx)
-    for csv_file in sorted(glob.glob(os.path.join(mvd_dir, "*.csv"))):
-        heading = _filename_to_heading(os.path.basename(csv_file))
-        try:
-            with open(csv_file, newline="", encoding="utf-8") as f:
-                reader = csv.DictReader(f)
-                best_idx = None
-                best_ent = None
-                for row in reader:
-                    ent = (row.get("ApplicableEntity") or "").strip()
-                    if ent in chain_set:
-                        idx = supertype_chain.index(ent)
-                        if best_idx is None or idx < best_idx:
-                            best_idx = idx
-                            best_ent = ent
-                if best_ent is not None:
-                    raw.append((heading, best_ent, best_idx))
-        except Exception:
+    return [
+        (a.name, getattr(a.type, "name", "(unknown)"))
+        for a in entity.attributes
+        if isinstance(a, Attribute)
+    ]
+
+
+def _model_rules(entity):
+    """Return [(name, body_first_line)] for xmi.py Class constraints."""
+    if not isinstance(entity, Class):
+        return []
+    out = []
+    for rule in entity.attributes:
+        if not isinstance(rule, Constraint):
             continue
-    # Score: priority concepts ALWAYS first (regardless of inheritance depth),
-    # then by chain idx (direct bindings before inherited), then alphabetical.
-    def score(item):
-        h, ent, idx = item
-        is_priority = 0 if h in _PRIORITY_CONCEPTS else 1
-        return (is_priority, idx, h)
-    raw.sort(key=score)
-    # Collapse Body-geometry family: at most one Body* heading, the closest
-    # binding. Author can add more after seeing what their entity needs.
-    capped = []
-    body_seen = False
-    for h, ent, idx in raw:
-        if h.startswith(_BODY_GEOMETRY_FAMILY) and h not in _PRIORITY_CONCEPTS:
-            if body_seen:
-                continue
-            body_seen = True
-        capped.append((h, ent, idx))
-        if len(capped) >= max_results:
-            break
-    return [(h, ent) for h, ent, idx in capped]
+        preview = (rule.body or "").strip().splitlines()
+        out.append((rule.name, preview[0][:140] if preview else ""))
+    return out
+
+
+def _model_enum_literals(entity):
+    if not isinstance(entity, Enumeration):
+        return []
+    return [lit for lit in entity.literals if lit]
 
 
 def scaffold_entity(name, supertype, attrs, rules, applicable_concepts=None,
@@ -890,32 +710,35 @@ def main():
     )
     args = parser.parse_args()
 
-    doc = minidom.parse(args.uml_path)
+    model = Model.load(args.uml_path)
     written, skipped = 0, 0
     workbook = load_property_workbook(args.properties_xlsx)
 
     for nm in args.names:
-        el = _find_entity(doc, nm)
-        if el is None:
+        element = model.by_name(nm)
+        if element is None:
             if nm.startswith("Qto_") and nm in workbook.rows_by_set:
-                kind_xmi = "uml:Class"
                 kind = "qto"
             elif nm.startswith("Pset_") and nm in workbook.rows_by_set:
-                kind_xmi = "uml:Class"
                 kind = "pset"
             elif nm.startswith("PEnum_") and nm in workbook.penum_items:
-                kind_xmi = "uml:Enumeration"
                 kind = "penum"
             else:
                 print(f"[skip] {nm}: not found in {args.uml_path}", file=sys.stderr)
                 skipped += 1
                 continue
-        else:
-            kind_xmi = el.getAttribute("xmi:type")
-            kind = None
-
-        if kind_xmi == "uml:DataType":
+        elif isinstance(element, DataType):
             kind = "type"
+        elif isinstance(element, Enumeration):
+            kind = "penum" if nm.startswith("PEnum_") else "enum"
+        elif isinstance(element, Class):
+            kind = "qto" if nm.startswith("Qto_") else "pset" if nm.startswith("Pset_") else "entity"
+        else:
+            print(f"[skip] {nm}: unsupported XMI object {type(element).__name__}", file=sys.stderr)
+            skipped += 1
+            continue
+
+        if kind == "type":
             target = find_target_path(args.uml_path, args.docs_root, nm, kind)
             short_def = (
                 load_short_def(args.ifc_spec_dir, nm, kind)
@@ -923,8 +746,7 @@ def main():
             )
             content = scaffold_datatype(nm, short_def=short_def)
             extra_outputs = []
-        elif kind_xmi == "uml:Enumeration":
-            kind = kind or ("penum" if nm.startswith("PEnum_") else "enum")
+        elif kind in {"enum", "penum"}:
             target = find_target_path(args.uml_path, args.docs_root, nm, kind)
             if kind == "penum":
                 items = workbook.penum_items.get(nm, [])
@@ -935,7 +757,7 @@ def main():
                         nm,
                         [
                             PEnumWorkbookItem(nm, lit, "")
-                            for lit in (_enum_literals(el) if el is not None else [])
+                            for lit in _model_enum_literals(element)
                         ],
                     )
             else:
@@ -945,12 +767,11 @@ def main():
                 )
                 literal_docs = load_enum_literal_docs(args.ifc_spec_dir, nm)
                 content = scaffold_enum(
-                    nm, _enum_literals(el),
+                    nm, _model_enum_literals(element),
                     short_def=short_def, literal_docs=literal_docs,
                 )
             extra_outputs = []
-        elif kind_xmi == "uml:Class":
-            kind = kind or ("qto" if nm.startswith("Qto_") else "pset" if nm.startswith("Pset_") else "entity")
+        elif kind in {"entity", "pset", "qto"}:
             target = find_target_path(args.uml_path, args.docs_root, nm, kind)
             short_def = (
                 load_short_def(args.ifc_spec_dir, nm, kind)
@@ -990,12 +811,12 @@ def main():
                         file=sys.stderr,
                     )
                 content = scaffold_entity(
-                    nm, None, _own_attrs(el), _where_rules(el),
+                    nm, None, _model_attrs(element), _model_rules(element),
                     attr_docs=attr_docs, rule_docs=rule_docs,
                     short_def=short_def,
                 )
         else:
-            print(f"[skip] {nm}: unsupported xmi:type {kind_xmi}", file=sys.stderr)
+            print(f"[skip] {nm}: unsupported kind {kind}", file=sys.stderr)
             skipped += 1
             continue
 
