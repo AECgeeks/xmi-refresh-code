@@ -153,8 +153,9 @@ class converter:
 
     def __init__(self, package_resolver : package_resolver, schema_name, filepath : Optional[str | Path] = None):
         self.schema_name = schema_name
-        if filepath:
-            self.M = xmi.Model.load(filepath)
+        self.filepath = Path(filepath) if filepath else None
+        if self.filepath:
+            self.M = xmi.Model.load(self.filepath)
         else:
             self.M = xmi.Model(schema_name)
         self.models = xmi.ModelSet.from_model(self.M)
@@ -528,7 +529,7 @@ class converter:
                     continue
 
     def save(self):
-        self.models.save()
+        self.models.save(self.filepath.parent if self.filepath is not None else None)
 
 if __name__ == "__main__":
     import argparse
