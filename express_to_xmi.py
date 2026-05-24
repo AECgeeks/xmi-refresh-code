@@ -539,7 +539,7 @@ if __name__ == "__main__":
     parser.add_argument('--entity-names', help='Express schema entity names to filter on', nargs='+')
     parser.add_argument('--ea', help='Enterprise Architect .xmi file to resolve containing package and deprecated entities')
     parser.add_argument('--json', help='JSON file containing a single top-level array of deprecated entity names')
-    parser.add_argument('--psd', help='Directory, glob pattern or single XML file path for property set definitions')
+    parser.add_argument('--psd', nargs='+', action='append', help='One or more directories, glob patterns or single XML file paths for property set definitions')
     parser.add_argument('--modify', nargs='?', const=str(MODIFY_WORKBOOK), help='Apply property updates from a workbook (.xlsx) or CSV file (.csv)')
     parser.add_argument('--modify-sheet', default=MODIFY_SHEET, help='Workbook sheet to use with --modify (ignored for CSV input)')
     parser.add_argument('--output', help='Output UML file')
@@ -570,7 +570,8 @@ if __name__ == "__main__":
             nf = set(args.entity_names)
         ms = cv.convert_express_to_xmi(args.express, de, name_filter=nf)
     if args.psd:
-        cv.write_properties(args.psd)
+        for pset_pattern in (pattern for group in args.psd for pattern in group):
+            cv.write_properties(pset_pattern)
     if args.modify:
         cv.modify_properties(args.modify, args.modify_sheet)
     cv.save()
