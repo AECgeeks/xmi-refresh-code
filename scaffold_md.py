@@ -9,10 +9,11 @@ Example:
         /path/to/docs \\
         IfcArchElement IfcArchElementType IfcArchElementTypeEnum
 
-Reads the UML to determine kind (uml:Class, uml:Enumeration), attributes,
-and WHERE rules. Writes scaffolds to:
+Reads the UML to determine kind (uml:Class, uml:Enumeration,
+uml:Constraint functions), attributes, and WHERE rules. Writes scaffolds to:
     {docs_root}/schemas/<layer>/<schema>/Entities/<Name>.md
     {docs_root}/schemas/<layer>/<schema>/Types/<Name>.md  (for enums)
+    {docs_root}/schemas/<layer>/<schema>/Functions/<Name>.md  (for functions)
     {docs_root}/schemas/<layer>/<schema>/PropertySets/<Name>.md  (for psets)
     {docs_root}/schemas/<layer>/<schema>/QuantitySets/<Name>.md  (for qtos)
     {docs_root}/properties/<first-letter>/<Name>.md  (for pset/qto members)
@@ -78,9 +79,9 @@ def _clean_doc_text(s):
     """
     if not s:
         return ""
-    # &amp;nbsp; → &nbsp; → real space (NBSP would also be fine but breaks
+    # &amp;nbsp; -> &nbsp; -> real space (NBSP would also be fine but breaks
     # plain-text diffs; collapse to a regular space).
-    s = s.replace("&nbsp;", " ")
+    s = re.sub(r"(?:&nbsp;|\u00a0)+[ \t]*", " ", s)
     # Some sources double-escape: &amp;amp; → &amp; → keep as-is.
     # Normalise line endings, strip trailing whitespace.
     lines = [ln.rstrip() for ln in s.replace("\r\n", "\n").split("\n")]
@@ -96,7 +97,7 @@ def _read_text_file(path):
     if not path or not os.path.exists(path):
         return None
     try:
-        return Path(path).read_text(encoding="utf-8").strip()
+        return _clean_doc_text(Path(path).read_text(encoding="utf-8"))
     except Exception:
         return None
 
@@ -234,7 +235,7 @@ def _extract_existing_short_def(md_path):
 def load_short_def(spec_dir, name, kind):
     """Read Documentation.md from the canonical IFC-Specification location.
 
-    kind ∈ {entity, pset, qto, enum, penum}.
+    kind in {entity, pset, qto, enum, penum, function}.
     PEnums embed their documentation inline in PropertyEnumerations/<x>/<name>.xml.
     """
     if not spec_dir:
@@ -260,6 +261,7 @@ def load_short_def(spec_dir, name, kind):
         "qto": "QuantitySets",
         "enum": "Types",
         "type": "Types",
+        "function": "Functions",
     }.get(kind)
     if not subdir:
         return None
@@ -647,15 +649,77 @@ def scaffold_penum(name, items):
     return "\n".join(lines).rstrip() + "\n"
 
 
-def find_target_path(uml_path, docs_root, ent_name, kind):
+def _split_function_doc(markdown):
+    """Split function Documentation.md into short definition and remainder."""
+    markdown = (markdown or "").strip()
+    if not markdown:
+        return "", ""
+
+    lines = markdown.splitlines()
+    split_at = None
+    saw_content = False
+    for idx, line in enumerate(lines):
+        stripped = line.strip()
+        if not stripped:
+            if saw_content:
+                split_at = idx
+                break
+            continue
+        if saw_content and stripped.startswith(">"):
+            split_at = idx
+            break
+        saw_content = True
+
+    if split_at is None:
+        return markdown, ""
+
+    short_def = "\n".join(lines[:split_at]).strip()
+    rest = "\n".join(lines[split_at:]).strip()
+    return short_def, rest
+
+
+def scaffold_function(name, short_def=None):
+    doc_short, doc_rest = _split_function_doc(short_def)
+    lines = [f"# {name}", ""]
+    if doc_short:
+        lines.append(doc_short)
+    else:
+        lines.append(f"<!-- FILL IN: short definition of {name}. -->")
+    lines.append("<!-- end of short definition -->")
+    if doc_rest:
+        lines.append("")
+        lines.append(doc_rest)
+    return "\n".join(lines).rstrip() + "\n"
+
+
+def _owning_schema_name(element):
+    owner = getattr(element, "owner", None)
+    while owner is not None:
+        name = getattr(owner, "name", "")
+        xmi_id = getattr(owner, "xmi_id", "")
+        if name and xmi_id.startswith("pk_"):
+            return name
+        owner = getattr(owner, "owner", None)
+    return None
+
+
+def find_target_path(uml_path, docs_root, ent_name, kind, schema_name=None):
     """Best-effort path resolution: <docs_root>/schemas/<layer>/<schema>/<dir>/<name>.md.
 
     Existing docs are preferred when present. Otherwise <schema> is the UML
     filename stem and <layer> is read from <docs_root>/schemas/*/<schema>/.
     """
     docs_root = Path(docs_root)
-    schema = Path(uml_path).stem  # e.g. IfcSharedBldgElements
-    subdir = {"entity": "Entities", "enum": "Types", "type": "Types", "penum": "PropertyEnumerations", "pset": "PropertySets", "qto": "QuantitySets"}[kind]
+    schema = schema_name or Path(uml_path).stem  # e.g. IfcSharedBldgElements
+    subdir = {
+        "entity": "Entities",
+        "enum": "Types",
+        "type": "Types",
+        "function": "Functions",
+        "penum": "PropertyEnumerations",
+        "pset": "PropertySets",
+        "qto": "QuantitySets",
+    }[kind]
 
     existing = sorted((docs_root / "schemas").glob(f"*/*/{subdir}/{ent_name}.md"))
     if existing:
@@ -712,16 +776,23 @@ def main():
 
     model = Model.load(args.uml_path)
     written, skipped = 0, 0
-    workbook = load_property_workbook(args.properties_xlsx)
+    workbook = None
+
+    def get_workbook():
+        nonlocal workbook
+        if workbook is None:
+            workbook = load_property_workbook(args.properties_xlsx)
+        return workbook
 
     for nm in args.names:
         element = model.by_name(nm)
         if element is None:
-            if nm.startswith("Qto_") and nm in workbook.rows_by_set:
+            workbook_content = get_workbook()
+            if nm.startswith("Qto_") and nm in workbook_content.rows_by_set:
                 kind = "qto"
-            elif nm.startswith("Pset_") and nm in workbook.rows_by_set:
+            elif nm.startswith("Pset_") and nm in workbook_content.rows_by_set:
                 kind = "pset"
-            elif nm.startswith("PEnum_") and nm in workbook.penum_items:
+            elif nm.startswith("PEnum_") and nm in workbook_content.penum_items:
                 kind = "penum"
             else:
                 print(f"[skip] {nm}: not found in {args.uml_path}", file=sys.stderr)
@@ -733,23 +804,35 @@ def main():
             kind = "penum" if nm.startswith("PEnum_") else "enum"
         elif isinstance(element, Class):
             kind = "qto" if nm.startswith("Qto_") else "pset" if nm.startswith("Pset_") else "entity"
+        elif isinstance(element, Constraint) and element.language == "EXPRESS_FUNCTION":
+            kind = "function"
         else:
             print(f"[skip] {nm}: unsupported XMI object {type(element).__name__}", file=sys.stderr)
             skipped += 1
             continue
 
+        schema_name = _owning_schema_name(element) if element is not None else None
+
         if kind == "type":
-            target = find_target_path(args.uml_path, args.docs_root, nm, kind)
+            target = find_target_path(args.uml_path, args.docs_root, nm, kind, schema_name=schema_name)
             short_def = (
                 load_short_def(args.ifc_spec_dir, nm, kind)
                 or _extract_existing_short_def(target)
             )
             content = scaffold_datatype(nm, short_def=short_def)
             extra_outputs = []
+        elif kind == "function":
+            target = find_target_path(args.uml_path, args.docs_root, nm, kind, schema_name=schema_name)
+            short_def = (
+                load_short_def(args.ifc_spec_dir, nm, kind)
+                or _extract_existing_short_def(target)
+            )
+            content = scaffold_function(nm, short_def=short_def)
+            extra_outputs = []
         elif kind in {"enum", "penum"}:
-            target = find_target_path(args.uml_path, args.docs_root, nm, kind)
+            target = find_target_path(args.uml_path, args.docs_root, nm, kind, schema_name=schema_name)
             if kind == "penum":
-                items = workbook.penum_items.get(nm, [])
+                items = get_workbook().penum_items.get(nm, [])
                 if items:
                     content = scaffold_penum(nm, items)
                 else:
@@ -772,14 +855,14 @@ def main():
                 )
             extra_outputs = []
         elif kind in {"entity", "pset", "qto"}:
-            target = find_target_path(args.uml_path, args.docs_root, nm, kind)
+            target = find_target_path(args.uml_path, args.docs_root, nm, kind, schema_name=schema_name)
             short_def = (
                 load_short_def(args.ifc_spec_dir, nm, kind)
                 or _extract_existing_short_def(target)
             )
             extra_outputs = []
             if kind in {"pset", "qto"}:
-                rows = workbook.rows_by_set.get(nm, [])
+                rows = get_workbook().rows_by_set.get(nm, [])
                 comments = [
                     (row.name, row.local_definition)
                     for row in rows
