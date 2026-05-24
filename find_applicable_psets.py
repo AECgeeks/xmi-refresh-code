@@ -26,7 +26,7 @@ def main():
     for file in sorted(glob.glob(pattern, recursive=True)):
         path = Path(file)
         if path.is_file() and matches(applicable_values(path), targets):
-            print(path.name)
+            print(path)
 
 
 if __name__ == "__main__":
