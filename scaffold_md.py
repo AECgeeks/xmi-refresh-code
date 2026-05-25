@@ -26,6 +26,7 @@ Per `local/pipeline-changes.md` item E (Markdown scaffolding) and Thomas's
 """
 import argparse
 import glob
+import csv
 import os
 import re
 import sys
@@ -207,6 +208,28 @@ def load_property_workbook(xlsx_path):
             )
 
     return WorkbookContent(rows_by_set=rows_by_set, penum_items=penum_items)
+
+
+def load_penum_norm_csv(csv_path):
+    """{penum_name: [PEnumWorkbookItem]} from 2_penum_update_applied.csv.
+
+    Uses post-normalization names ('Values for initial upload' column) so
+    that [ED] scaffolds after apply_penum_normalization.py show correct names.
+    """
+    if not csv_path:
+        return {}
+    csv_path = Path(csv_path)
+    if not csv_path.exists():
+        return {}
+    out = defaultdict(list)
+    with csv_path.open(encoding="utf-8-sig", newline="") as f:
+        for row in csv.DictReader(f):
+            name = (row.get("Penum Name") or "").strip()
+            value = (row.get("Values for initial upload") or "").strip()
+            desc = (row.get("Original Description") or "").strip()
+            if name and value:
+                out[name].append(PEnumWorkbookItem(name, value, desc))
+    return dict(out)
 
 
 def _extract_existing_short_def(md_path):
@@ -772,11 +795,22 @@ def main():
             "'1 - PENUMs for initial upload'."
         ),
     )
+    parser.add_argument(
+        "--penum-norm-csv",
+        default=None,
+        help=(
+            "Path to 2_penum_update_applied.csv. When set, PEnum MDs are built from "
+            "post-normalization literal names in 'Values for initial upload' column "
+            "instead of the workbook. Use this flag when re-scaffolding after "
+            "apply_penum_normalization.py for [ED] commits."
+        ),
+    )
     args = parser.parse_args()
 
     model = Model.load(args.uml_path)
     written, skipped = 0, 0
     workbook = None
+    penum_norm = load_penum_norm_csv(args.penum_norm_csv)
 
     def get_workbook():
         nonlocal workbook
@@ -832,7 +866,10 @@ def main():
         elif kind in {"enum", "penum"}:
             target = find_target_path(args.uml_path, args.docs_root, nm, kind, schema_name=schema_name)
             if kind == "penum":
-                items = get_workbook().penum_items.get(nm, [])
+                items = (
+                    penum_norm.get(nm)
+                    or get_workbook().penum_items.get(nm, [])
+                )
                 if items:
                     content = scaffold_penum(nm, items)
                 else:
