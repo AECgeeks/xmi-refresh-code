@@ -232,6 +232,153 @@ def load_penum_norm_csv(csv_path):
     return dict(out)
 
 
+def _html_entity_def(html_spec_dir, name):
+    """Extract entity short definition from integration-work/HTML schema pages."""
+    if not html_spec_dir:
+        return None
+    pattern = os.path.join(html_spec_dir, "schema", "*", "lexical", f"{name.lower()}.htm")
+    path = _glob_first(pattern)
+    if not path:
+        return None
+    try:
+        html = Path(path).read_text(encoding="utf-8")
+    except Exception:
+        return None
+    m = re.search(r"Entity definition</summary><p>(.*?)</p>", html, re.DOTALL)
+    if not m:
+        return None
+    return re.sub(r"<[^>]+>", "", m.group(1)).strip() or None
+
+
+def _html_pset_def(html_spec_dir, name):
+    """Extract Pset/Qto short definition from integration-work/HTML psd/*.xml."""
+    if not html_spec_dir:
+        return None
+    path = os.path.join(html_spec_dir, "psd", f"{name}.xml")
+    if not os.path.exists(path):
+        path_q = os.path.join(html_spec_dir, "qto", f"{name}.xml")
+        if not os.path.exists(path_q):
+            return None
+        path = path_q
+    try:
+        doc = minidom.parse(path)
+    except Exception:
+        return None
+    for d in doc.getElementsByTagName("Definition"):
+        txt = (_text_of(d) or "").strip()
+        if txt:
+            return txt
+    return None
+
+
+def _html_enum_literal_docs(html_spec_dir, name):
+    """{literal: description} for TYPE enums from integration-work/HTML schema pages."""
+    if not html_spec_dir:
+        return {}
+    pattern = os.path.join(html_spec_dir, "schema", "*", "lexical", f"{name.lower()}.htm")
+    path = _glob_first(pattern)
+    if not path:
+        return {}
+    try:
+        html = Path(path).read_text(encoding="utf-8")
+    except Exception:
+        return {}
+    rows = re.findall(r"<tr><td>([A-Z_]+)</td><td>\s*(.*?)\s*</td></tr>", html, re.DOTALL)
+    return {
+        name: re.sub(r"<[^>]+>", "", desc).strip()
+        for name, desc in rows
+        if re.sub(r"<[^>]+>", "", desc).strip()
+    }
+
+
+def _local_md_def(local_md_dir, name):
+    """Extract short definition from integration-work/ifc4x4_mds/<name>.md.
+
+    The tunnel-team ifc4x4_mds/ files carry a UTF-8 BOM and have no H1 or
+    <!-- end of short definition --> marker; the short def is whatever sits
+    before the first '## ' heading.
+    """
+    if not local_md_dir:
+        return None
+    path = os.path.join(local_md_dir, f"{name}.md")
+    if not os.path.exists(path):
+        return None
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig")
+    except Exception:
+        return None
+    marker = "<!-- end of short definition -->"
+    if marker in text:
+        text = text.split(marker, 1)[0]
+    else:
+        m = re.search(r"(?m)^## ", text)
+        if m:
+            text = text[: m.start()]
+    text = text.strip()
+    return text or None
+
+
+def _local_enum_literal_docs(local_md_dir, name):
+    """{literal: description} for TYPE enums from integration-work/ifc4x4_mds/.
+
+    Reads the '## Items' section, parsing '### LITERAL\\n<prose>' blocks.
+    """
+    if not local_md_dir:
+        return {}
+    path = os.path.join(local_md_dir, f"{name}.md")
+    if not os.path.exists(path):
+        return {}
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig")
+    except Exception:
+        return {}
+    m = re.search(r"^## Items\s*\n(.*?)(?=^## |\Z)", text, re.DOTALL | re.MULTILINE)
+    if not m:
+        return {}
+    section = m.group(1)
+    out = {}
+    for block in re.finditer(
+        r"^### ([A-Z_][A-Z0-9_]*)\s*\n(.*?)(?=^### |\Z)",
+        section, re.DOTALL | re.MULTILINE,
+    ):
+        desc = block.group(2).strip()
+        if desc:
+            out[block.group(1)] = desc
+    return out
+
+
+def _local_section_docs(local_md_dir, name, section_heading):
+    """{item_name: description} from a '## <section_heading>' block of ifc4x4_mds/<name>.md.
+
+    Used for per-attribute prose ('## Attributes') and per-WHERE-rule prose
+    ('## Formal Propositions'). Returns an empty dict if the file or section
+    is absent.
+    """
+    if not local_md_dir:
+        return {}
+    path = os.path.join(local_md_dir, f"{name}.md")
+    if not os.path.exists(path):
+        return {}
+    try:
+        text = Path(path).read_text(encoding="utf-8-sig")
+    except Exception:
+        return {}
+    pat = r"^## " + re.escape(section_heading) + r"\s*\n(.*?)(?=^## |\Z)"
+    m = re.search(pat, text, re.DOTALL | re.MULTILINE)
+    if not m:
+        return {}
+    section = m.group(1)
+    out = {}
+    for block in re.finditer(
+        r"^### (\w+)\s*\n(.*?)(?=^### |\Z)",
+        section, re.DOTALL | re.MULTILINE,
+    ):
+        desc = block.group(2).strip()
+        if desc:
+            out[block.group(1)] = desc
+    return out
+
+
 def _extract_existing_short_def(md_path):
     """Return the text between the title and the short-definition marker."""
     if not md_path or not Path(md_path).exists():
@@ -805,6 +952,28 @@ def main():
             "apply_penum_normalization.py for [ED] commits."
         ),
     )
+    parser.add_argument(
+        "--html-spec-dir",
+        default=None,
+        help=(
+            "Path to integration-work/HTML directory (tunnel team Box zip render). "
+            "When set, entity definitions are read from schema/*/lexical/*.htm, "
+            "Pset/Qto definitions from psd/*.xml or qto/*.xml, and TYPE enum "
+            "literal descriptions from schema/*/lexical/*.htm. "
+            "Takes precedence over --ifc-spec-dir when both are given."
+        ),
+    )
+    parser.add_argument(
+        "--local-md-dir",
+        default=None,
+        help=(
+            "Path to integration-work/ifc4x4_mds/ (tunnel-team authored markdowns "
+            "for new 4.4 entities, TYPE enums, and measure types). When set, takes "
+            "priority over --html-spec-dir and --ifc-spec-dir for entity/datatype/"
+            "enum short definitions and per-literal enum descriptions. Replaces the "
+            "manual Step 5B overlay loop documented in complete-sequence-no-spec.md."
+        ),
+    )
     args = parser.parse_args()
 
     model = Model.load(args.uml_path)
@@ -850,7 +1019,9 @@ def main():
         if kind == "type":
             target = find_target_path(args.uml_path, args.docs_root, nm, kind, schema_name=schema_name)
             short_def = (
-                load_short_def(args.ifc_spec_dir, nm, kind)
+                _local_md_def(args.local_md_dir, nm)
+                or _html_entity_def(args.html_spec_dir, nm)
+                or load_short_def(args.ifc_spec_dir, nm, kind)
                 or _extract_existing_short_def(target)
             )
             content = scaffold_datatype(nm, short_def=short_def)
@@ -882,10 +1053,15 @@ def main():
                     )
             else:
                 short_def = (
-                    load_short_def(args.ifc_spec_dir, nm, kind)
+                    _local_md_def(args.local_md_dir, nm)
+                    or load_short_def(args.ifc_spec_dir, nm, kind)
                     or _extract_existing_short_def(target)
                 )
-                literal_docs = load_enum_literal_docs(args.ifc_spec_dir, nm)
+                literal_docs = (
+                    _local_enum_literal_docs(args.local_md_dir, nm)
+                    or _html_enum_literal_docs(args.html_spec_dir, nm)
+                    or load_enum_literal_docs(args.ifc_spec_dir, nm)
+                )
                 content = scaffold_enum(
                     nm, _model_enum_literals(element),
                     short_def=short_def, literal_docs=literal_docs,
@@ -893,10 +1069,19 @@ def main():
             extra_outputs = []
         elif kind in {"entity", "pset", "qto"}:
             target = find_target_path(args.uml_path, args.docs_root, nm, kind, schema_name=schema_name)
-            short_def = (
-                load_short_def(args.ifc_spec_dir, nm, kind)
-                or _extract_existing_short_def(target)
-            )
+            if kind in {"pset", "qto"}:
+                short_def = (
+                    _html_pset_def(args.html_spec_dir, nm)
+                    or load_short_def(args.ifc_spec_dir, nm, kind)
+                    or _extract_existing_short_def(target)
+                )
+            else:
+                short_def = (
+                    _local_md_def(args.local_md_dir, nm)
+                    or _html_entity_def(args.html_spec_dir, nm)
+                    or load_short_def(args.ifc_spec_dir, nm, kind)
+                    or _extract_existing_short_def(target)
+                )
             extra_outputs = []
             if kind in {"pset", "qto"}:
                 rows = get_workbook().rows_by_set.get(nm, [])
@@ -924,9 +1109,13 @@ def main():
                     )
             else:
                 attr_docs, rule_docs = load_doc_entity(args.ifc_spec_dir, nm)
-                if args.ifc_spec_dir and not (short_def or attr_docs or rule_docs):
+                local_attrs = _local_section_docs(args.local_md_dir, nm, "Attributes")
+                local_rules = _local_section_docs(args.local_md_dir, nm, "Formal Propositions")
+                attr_docs = {**attr_docs, **local_attrs}
+                rule_docs = {**rule_docs, **local_rules}
+                if (args.ifc_spec_dir or args.local_md_dir) and not (short_def or attr_docs or rule_docs):
                     print(
-                        f"[info] {nm}: no prose found under --ifc-spec-dir; "
+                        f"[info] {nm}: no prose found under --local-md-dir or --ifc-spec-dir; "
                         f"falling back to convention-based synthesis",
                         file=sys.stderr,
                     )
