@@ -471,6 +471,8 @@ class converter:
                 else:
                     ptype = None
                 cls : xmi.Class = self.M.by_name(rel)
+                if cls is None:
+                    raise ValueError(f"On {pdef.name} the applicability {rel} cannot be resolved to a valid type in UML")
                 if 'IfcTypeObject' in cls.supertype_names():
                     cls = self.M.by_name(cls.name.removesuffix('Style').removesuffix('Type'))
                 if ptype is not None:
