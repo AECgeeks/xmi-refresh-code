@@ -19,6 +19,7 @@ Usage:
 """
 import argparse
 import csv
+import re
 import sys
 from collections import defaultdict
 from pathlib import Path
@@ -86,6 +87,22 @@ def rewrite_penum_in_xml(uml_path: Path, penum_name: str, literals: list[str]) -
     return True
 
 
+def rewrite_penum_in_md(uml_path: Path, penum_name: str, literals: list[str]) -> None:
+    for md_path in (uml_path.parent / "../docs/schemas").glob(f"**/{penum_name}.md"):
+        text = md_path.read_text(encoding="utf-8")
+        headings = [line[4:] for line in text.splitlines() if line.startswith("### ")]
+        for old, new in zip(headings, literals):
+            text = text.replace(f"### {old}\n", f"### {new}\n")
+        for lit, paragraph in {
+            "UNSET": "Value has not been specified.",
+            "NOTKNOWN": "Value is unkown.",
+            "OTHER": "The value falls outside of the predefined values of this enumeration.",
+        }.items():
+            if lit in literals:
+                text = re.sub(rf"(^### {lit}\n).*?(?=^#+ |\Z)", rf"\1{paragraph}\n\n", text, flags=re.M | re.S)
+        md_path.write_text(text, encoding="utf-8")
+
+
 def main():
     p = argparse.ArgumentParser(description=__doc__, formatter_class=argparse.RawDescriptionHelpFormatter)
     p.add_argument("--uml", type=Path, required=True, help="UML file to modify (in-place)")
@@ -106,6 +123,7 @@ def main():
             missing_in_csv.append(name)
             continue
         if rewrite_penum_in_xml(args.uml, name, lits):
+            rewrite_penum_in_md(args.uml, name, lits)
             rewritten.append((name, lits))
         else:
             missing_in_uml.append(name)
