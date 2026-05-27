@@ -12,6 +12,8 @@ Provide a GitHub token when prompted:
 
 Only branch content, PR title, and PR description are copied. Review comments,
 issue comments, labels, assignees, reviewers, and other metadata are not copied.
+Source PRs are skipped when the target repository already has any open, closed,
+or merged PR with the same title.
 """
 
 from __future__ import annotations
@@ -299,6 +301,48 @@ def list_existing_target_prs(
     )
 
 
+def normalize_pr_title(value: str) -> str:
+    return " ".join(value.replace("\u00a0", " ").split())
+
+
+def quote_github_search_phrase(value: str) -> str:
+    value = normalize_pr_title(value)
+    return '"' + value.replace('"', " ") + '"'
+
+
+def list_target_prs_with_title(
+    repo_path: Path,
+    target_repo: str,
+    title: str,
+    env: dict[str, str],
+) -> list[dict[str, Any]]:
+    title = normalize_pr_title(title)
+    matches = run_json(
+        [
+            "gh",
+            "pr",
+            "list",
+            "--repo",
+            target_repo,
+            "--state",
+            "all",
+            "--search",
+            f"{quote_github_search_phrase(title)} in:title",
+            "--limit",
+            "100",
+            "--json",
+            "number,title,state,url",
+        ],
+        repo_path,
+        env,
+    )
+    return [
+        pr
+        for pr in (matches or [])
+        if normalize_pr_title(pr.get("title") or "") == title
+    ]
+
+
 def create_target_pr(
     repo_path: Path,
     target_repo: str,
@@ -370,6 +414,26 @@ def process_pr(
         raise RuntimeError(f"Source PR #{pr_number} has no head branch name.")
     print_pr_summary(pr, target_branch)
 
+    title = pr.get("title") or f"Copy of PR #{pr_number}"
+    matching_title_prs = list_target_prs_with_title(
+        repo_path,
+        target_repo,
+        title,
+        env,
+    )
+    if matching_title_prs:
+        print(
+            "Skipped because the target repo already has a PR with this title:",
+            file=sys.stderr,
+        )
+        for existing in matching_title_prs:
+            print(
+                f"  #{existing['number']} [{existing.get('state') or 'UNKNOWN'}] "
+                f"{existing.get('title') or ''} {existing.get('url') or ''}",
+                file=sys.stderr,
+            )
+        return False
+
     if not terminal.confirm("Process this PR"):
         print("Skipped.", file=sys.stderr)
         return False
@@ -439,7 +503,6 @@ def process_pr(
         print("Branch was pushed; target PR creation skipped.", file=sys.stderr)
         return True
 
-    title = pr.get("title") or f"Copy of PR #{pr_number}"
     body = pr.get("body") or ""
     print(
         "Will create target PR with: "
