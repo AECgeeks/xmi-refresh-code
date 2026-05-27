@@ -396,6 +396,8 @@ class converter:
                 if (e.name(), inv.name()) not in processed_symmetric_inverses:
                     inv_name = f"INV_{inv.name()}{aggregation_suffix(inv, for_inverse=True)}"
                     opp : xmi.Class = self.M.by_name(inv.entity_reference().name())
+                    if opp is None:
+                        raise ValueError(f"On {e.name()} the inverse attribute {inv.name()} points to {inv.entity_reference().name()} which cannot be resolved to a valid type in UML")
                     opp.directed_association(e.name() + "_" + inv.name(), self.M.by_name(e.name()), inv_name, f"({inv.attribute_reference().name()})", owned_attribute=False)
                     print(' ', e.name(), inv)
 
